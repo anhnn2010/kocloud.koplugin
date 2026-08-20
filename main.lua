@@ -1,6 +1,7 @@
 local ButtonDialog = require("ui/widget/buttondialog")
 local Config = require("core/config")
 local Device = require("device")
+local filemanagerutil = require("apps/filemanager/filemanagerutil")
 local GoogleDriveProvider = require("providers/google_drive/provider")
 local InfoMessage = require("ui/widget/infomessage")
 local NetworkMgr = require("ui/network/manager")
@@ -23,6 +24,16 @@ local KOCloud = WidgetContainer:extend{
     name = "kocloud",
     is_doc_only = false,
 }
+
+--- Return whether a local file is supported by the KOCloud upload picker.
+---@param filename string
+---@return boolean
+local function isSupportedBookFile(filename)
+    local lower_name = filename:lower()
+
+    return lower_name:match("%.epub$") ~= nil
+        or lower_name:match("%.pdf$") ~= nil
+end
 
 --- Initialize KOCloud, load configuration, create the active provider,
 --- and register the plugin in the KOReader main menu.
@@ -65,6 +76,7 @@ function KOCloud:getManagedFolderCount()
     end
 
     local count = 0
+
     for _, folder_id in pairs(folders) do
         if type(folder_id) == "string" and folder_id ~= "" then
             count = count + 1
@@ -135,6 +147,15 @@ function KOCloud:getSubMenuItems()
                 end)
             end,
         })
+
+        if self:isStorageInitialized() then
+            table.insert(items, {
+                text = _("Upload book"),
+                callback = function()
+                    self:chooseBookForUpload()
+                end,
+            })
+        end
     end
 
     table.insert(items, {
@@ -179,6 +200,71 @@ function KOCloud:showStatus()
             self.config:getSettingsFile()
         ),
     })
+end
+
+--- Open KOReader's file chooser for a local EPUB or PDF.
+function KOCloud:chooseBookForUpload()
+    local title_header = _("Choose a book to upload")
+
+    local caller_callback = function(local_path)
+        NetworkMgr:runWhenOnline(function()
+            self:uploadBook(local_path)
+        end)
+    end
+
+    filemanagerutil.showChooseDialog(
+        title_header,
+        caller_callback,
+        nil,
+        filemanagerutil.getHomeFolder(),
+        isSupportedBookFile
+    )
+end
+
+--- Upload one local book into the KOCloud Books folder.
+---@param local_path string
+function KOCloud:uploadBook(local_path)
+    local uploading_message = InfoMessage:new{
+        text = string.format(
+            _("Uploading book…\n\n%s"),
+            local_path
+        ),
+    }
+
+    UIManager:show(uploading_message)
+
+    -- Let KOReader paint the message before starting synchronous network I/O.
+    UIManager:scheduleIn(0.1, function()
+        local book, err = self.provider:uploadBook(local_path)
+
+        UIManager:close(uploading_message)
+
+        if not book then
+            UIManager:show(InfoMessage:new{
+                text = string.format(
+                    _("Cannot upload book:\n\n%s"),
+                    err or _("Unknown error")
+                ),
+            })
+            return
+        end
+
+        -- uploadBook() may initialize missing folder IDs, so persist the
+        -- provider configuration after a successful transfer.
+        self.config:setProviderConfig(
+            self.provider:getType(),
+            self.provider.config
+        )
+        self.config:flush()
+
+        UIManager:show(InfoMessage:new{
+            text = string.format(
+                _("Book uploaded successfully.\n\n%s"),
+                book.name
+            ),
+            timeout = 4,
+        })
+    end)
 end
 
 --- Find or create the complete KOCloud Google Drive storage layout.
@@ -372,6 +458,7 @@ function KOCloud:pollGoogleDriveAuthorization()
         or (result.status == "error" and result.retry_after)
     then
         local retry_after = result.retry_after or session.interval
+
         UIManager:scheduleIn(
             retry_after,
             self.device_auth_poll_task
