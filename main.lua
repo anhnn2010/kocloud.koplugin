@@ -9,6 +9,8 @@ local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local _ = require("gettext")
 
+local EXPECTED_MANAGED_FOLDER_COUNT = 4
+
 --- Main KOCloud plugin container.
 ---@class KOCloudPlugin: WidgetContainer
 ---@field config KOCloudConfig
@@ -53,11 +55,31 @@ function KOCloud:getAuthStatusText()
     return _("Not connected")
 end
 
---- Return whether KOCloud storage has previously been initialized.
+--- Return the number of cached managed KOCloud folders.
+---@return integer
+function KOCloud:getManagedFolderCount()
+    local folders = self.provider.config.folders
+
+    if type(folders) ~= "table" then
+        return 0
+    end
+
+    local count = 0
+    for _, folder_id in pairs(folders) do
+        if type(folder_id) == "string" and folder_id ~= "" then
+            count = count + 1
+        end
+    end
+
+    return count
+end
+
+--- Return whether the complete KOCloud storage layout is initialized.
 ---@return boolean
 function KOCloud:isStorageInitialized()
     return type(self.provider.config.root_folder_id) == "string"
         and self.provider.config.root_folder_id ~= ""
+        and self:getManagedFolderCount() == EXPECTED_MANAGED_FOLDER_COUNT
 end
 
 --- Return a human-readable KOCloud storage status.
@@ -142,6 +164,7 @@ function KOCloud:showStatus()
                     .. "Connection: %s\n"
                     .. "OAuth app: %s\n"
                     .. "Storage: %s\n"
+                    .. "Managed folders: %d/%d\n"
                     .. "Root folder ID: %s\n"
                     .. "Settings: %s"
             ),
@@ -150,13 +173,15 @@ function KOCloud:showStatus()
             self:getAuthStatusText(),
             client_status,
             self:getStorageStatusText(),
+            self:getManagedFolderCount(),
+            EXPECTED_MANAGED_FOLDER_COUNT,
             root_folder_id,
             self.config:getSettingsFile()
         ),
     })
 end
 
---- Find or create the KOCloud root folder in Google Drive.
+--- Find or create the complete KOCloud Google Drive storage layout.
 ---@param touchmenu_instance? table
 function KOCloud:initializeGoogleDriveStorage(touchmenu_instance)
     if not self.provider:isConfigured() then
@@ -167,9 +192,10 @@ function KOCloud:initializeGoogleDriveStorage(touchmenu_instance)
         return
     end
 
-    local folder, created, err = self.provider:ensureRootFolder()
+    local folders, created_count, err =
+        self.provider:ensureStorageLayout()
 
-    if not folder then
+    if not folders then
         UIManager:show(InfoMessage:new{
             text = string.format(
                 _("Cannot initialize KOCloud storage:\n\n%s"),
@@ -186,15 +212,25 @@ function KOCloud:initializeGoogleDriveStorage(touchmenu_instance)
     self.config:flush()
 
     local message
-    if created then
+
+    if created_count > 0 then
         message = string.format(
-            _("KOCloud storage created successfully.\n\nFolder: %s"),
-            folder.name
+            _(
+                "KOCloud storage initialized successfully.\n\n"
+                    .. "Created %d folder(s).\n"
+                    .. "Root: %s"
+            ),
+            created_count,
+            folders.root.name
         )
     else
         message = string.format(
-            _("KOCloud storage verified successfully.\n\nFolder: %s"),
-            folder.name
+            _(
+                "KOCloud storage verified successfully.\n\n"
+                    .. "All managed folders are available.\n"
+                    .. "Root: %s"
+            ),
+            folders.root.name
         )
     end
 
