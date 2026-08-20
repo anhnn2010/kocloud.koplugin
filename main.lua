@@ -1,9 +1,11 @@
 local ButtonDialog = require("ui/widget/buttondialog")
 local Config = require("core/config")
+local ConfirmBox = require("ui/widget/confirmbox")
 local Device = require("device")
 local filemanagerutil = require("apps/filemanager/filemanagerutil")
 local GoogleDriveProvider = require("providers/google_drive/provider")
 local InfoMessage = require("ui/widget/infomessage")
+local lfs = require("libs/libkoreader-lfs")
 local Menu = require("ui/widget/menu")
 local NetworkMgr = require("ui/network/manager")
 local QRMessage = require("ui/widget/qrmessage")
@@ -35,6 +37,33 @@ local function isSupportedBookFile(filename)
 
     return lower_name:match("%.epub$") ~= nil
         or lower_name:match("%.pdf$") ~= nil
+end
+
+--- Convert a Google Drive file name into a safe local file name.
+---@param name string
+---@return string
+local function sanitizeLocalFilename(name)
+    local safe_name = name:gsub("[/\\]", "_")
+    safe_name = safe_name:gsub("^%s+", "")
+    safe_name = safe_name:gsub("%s+$", "")
+
+    if safe_name == "" or safe_name == "." or safe_name == ".." then
+        return "book"
+    end
+
+    return safe_name
+end
+
+--- Join a directory and file name using KOReader's local path convention.
+---@param directory string
+---@param filename string
+---@return string
+local function joinLocalPath(directory, filename)
+    if directory:sub(-1) == "/" then
+        return directory .. filename
+    end
+
+    return directory .. "/" .. filename
 end
 
 --- Initialize KOCloud, load configuration, create the active provider,
@@ -264,42 +293,179 @@ function KOCloud:showBooks()
             items_max_lines = 2,
         }
 
-        --- Show metadata for a selected book.
-        --- Download will be wired into this selection in the next step.
+        --- Open actions for the selected KOCloud book.
         ---@param item table
         function books_menu:onMenuSelect(item)
-            local book = item.book
-
-            if not book then
-                return
+            if item.book then
+                self.kocloud_plugin:showBookActions(item.book)
             end
-
-            local size_text = _("Unknown")
-
-            if book.size then
-                local size = tonumber(book.size)
-                if size then
-                    size_text = util.getFriendlySize(size)
-                end
-            end
-
-            UIManager:show(InfoMessage:new{
-                text = string.format(
-                    _(
-                        "Name: %s\n"
-                            .. "Size: %s\n"
-                            .. "Modified: %s\n"
-                            .. "Drive file ID: %s"
-                    ),
-                    book.name or _("Unknown"),
-                    size_text,
-                    book.modifiedTime or _("Unknown"),
-                    book.id or _("Unknown")
-                ),
-            })
         end
 
+        books_menu.kocloud_plugin = self
+
         UIManager:show(books_menu)
+    end)
+end
+
+--- Show actions for a KOCloud-managed book.
+---@param book KOCloudGoogleDriveFile
+function KOCloud:showBookActions(book)
+    local dialog
+
+    dialog = ButtonDialog:new{
+        title = book.name or _("Book"),
+        buttons = {
+            {
+                {
+                    text = _("Download"),
+                    callback = function()
+                        UIManager:close(dialog)
+                        self:chooseBookDownloadFolder(book)
+                    end,
+                },
+            },
+            {
+                {
+                    text = _("Details"),
+                    callback = function()
+                        self:showBookDetails(book)
+                    end,
+                },
+            },
+            {
+                {
+                    text = _("Close"),
+                    callback = function()
+                        UIManager:close(dialog)
+                    end,
+                },
+            },
+        },
+    }
+
+    UIManager:show(dialog)
+end
+
+--- Show metadata for a KOCloud-managed book.
+---@param book KOCloudGoogleDriveFile
+function KOCloud:showBookDetails(book)
+    local size_text = _("Unknown")
+
+    if book.size then
+        local size = tonumber(book.size)
+
+        if size then
+            size_text = util.getFriendlySize(size)
+        end
+    end
+
+    UIManager:show(InfoMessage:new{
+        text = string.format(
+            _(
+                "Name: %s\n"
+                    .. "Size: %s\n"
+                    .. "Modified: %s\n"
+                    .. "Drive file ID: %s"
+            ),
+            book.name or _("Unknown"),
+            size_text,
+            book.modifiedTime or _("Unknown"),
+            book.id or _("Unknown")
+        ),
+    })
+end
+
+--- Ask the user where a KOCloud book should be downloaded.
+---@param book KOCloudGoogleDriveFile
+function KOCloud:chooseBookDownloadFolder(book)
+    local title_header = _("Choose download folder")
+
+    local caller_callback = function(directory)
+        if not directory then
+            return
+        end
+
+        local filename = sanitizeLocalFilename(
+            book.name or "book"
+        )
+        local local_path = joinLocalPath(directory, filename)
+
+        self:confirmBookDownload(book, local_path)
+    end
+
+    filemanagerutil.showChooseDialog(
+        title_header,
+        caller_callback,
+        nil,
+        filemanagerutil.getHomeFolder()
+    )
+end
+
+--- Confirm overwrite when needed before downloading a book.
+---@param book KOCloudGoogleDriveFile
+---@param local_path string
+function KOCloud:confirmBookDownload(book, local_path)
+    if lfs.attributes(local_path, "mode") ~= "file" then
+        self:downloadBook(book, local_path)
+        return
+    end
+
+    UIManager:show(ConfirmBox:new{
+        text = string.format(
+            _(
+                "A file already exists at:\n\n%s\n\n"
+                    .. "Overwrite it?"
+            ),
+            local_path
+        ),
+        ok_text = _("Overwrite"),
+        ok_callback = function()
+            self:downloadBook(book, local_path)
+        end,
+    })
+end
+
+--- Download one KOCloud-managed book to local storage.
+---@param book KOCloudGoogleDriveFile
+---@param local_path string
+function KOCloud:downloadBook(book, local_path)
+    local downloading_message = InfoMessage:new{
+        text = string.format(
+            _("Downloading book…\n\n%s"),
+            book.name or _("Book")
+        ),
+    }
+
+    UIManager:show(downloading_message)
+
+    UIManager:scheduleIn(0.1, function()
+        local success, err = self.provider:downloadBook(
+            book.id,
+            local_path
+        )
+
+        UIManager:close(downloading_message)
+
+        if not success then
+            UIManager:show(InfoMessage:new{
+                text = string.format(
+                    _("Cannot download book:\n\n%s"),
+                    err or _("Unknown error")
+                ),
+            })
+            return
+        end
+
+        UIManager:show(InfoMessage:new{
+            text = string.format(
+                _(
+                    "Book downloaded successfully.\n\n"
+                        .. "%s"
+                ),
+                local_path
+            ),
+            timeout = 5,
+        })
     end)
 end
 
@@ -334,7 +500,6 @@ function KOCloud:uploadBook(local_path)
 
     UIManager:show(uploading_message)
 
-    -- Let KOReader paint the message before starting synchronous network I/O.
     UIManager:scheduleIn(0.1, function()
         local book, err = self.provider:uploadBook(local_path)
 
@@ -350,8 +515,6 @@ function KOCloud:uploadBook(local_path)
             return
         end
 
-        -- uploadBook() may initialize missing folder IDs, so persist the
-        -- provider configuration after a successful transfer.
         self.config:setProviderConfig(
             self.provider:getType(),
             self.provider.config
@@ -501,6 +664,7 @@ function KOCloud:startGoogleDriveAuthorization(touchmenu_instance)
 
     dialog.onCloseWidget = function(this)
         local super = getmetatable(this)
+
         if super.onCloseWidget then
             super.onCloseWidget(this)
         end
@@ -541,6 +705,7 @@ function KOCloud:pollGoogleDriveAuthorization()
         self.config:flush()
 
         local menu = self.device_auth_menu
+
         self:finishGoogleDriveAuthorizationDialog()
 
         UIManager:show(InfoMessage:new{
