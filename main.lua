@@ -53,6 +53,23 @@ function KOCloud:getAuthStatusText()
     return _("Not connected")
 end
 
+--- Return whether KOCloud storage has previously been initialized.
+---@return boolean
+function KOCloud:isStorageInitialized()
+    return type(self.provider.config.root_folder_id) == "string"
+        and self.provider.config.root_folder_id ~= ""
+end
+
+--- Return a human-readable KOCloud storage status.
+---@return string
+function KOCloud:getStorageStatusText()
+    if self:isStorageInitialized() then
+        return _("Initialized")
+    end
+
+    return _("Not initialized")
+end
+
 --- Return the KOCloud submenu items.
 ---@return table
 function KOCloud:getSubMenuItems()
@@ -79,6 +96,23 @@ function KOCloud:getSubMenuItems()
                 end)
             end,
         })
+    else
+        table.insert(items, {
+            text_func = function()
+                if self:isStorageInitialized() then
+                    return _("Verify storage")
+                end
+
+                return _("Initialize storage")
+            end,
+            callback = function(touchmenu_instance)
+                NetworkMgr:runWhenOnline(function()
+                    self:initializeGoogleDriveStorage(
+                        touchmenu_instance
+                    )
+                end)
+            end,
+        })
     end
 
     table.insert(items, {
@@ -91,11 +125,14 @@ function KOCloud:getSubMenuItems()
     return items
 end
 
---- Show KOCloud provider and OAuth status information.
+--- Show KOCloud provider, OAuth, and storage status information.
 function KOCloud:showStatus()
     local client_status = self.provider:isClientConfigured()
             and _("Configured")
         or _("Not configured")
+
+    local root_folder_id = self.provider.config.root_folder_id
+        or _("Not available")
 
     UIManager:show(InfoMessage:new{
         text = string.format(
@@ -104,15 +141,71 @@ function KOCloud:showStatus()
                     .. "Type: %s\n"
                     .. "Connection: %s\n"
                     .. "OAuth app: %s\n"
+                    .. "Storage: %s\n"
+                    .. "Root folder ID: %s\n"
                     .. "Settings: %s"
             ),
             self.provider:getName(),
             self.provider:getType(),
             self:getAuthStatusText(),
             client_status,
+            self:getStorageStatusText(),
+            root_folder_id,
             self.config:getSettingsFile()
         ),
     })
+end
+
+--- Find or create the KOCloud root folder in Google Drive.
+---@param touchmenu_instance? table
+function KOCloud:initializeGoogleDriveStorage(touchmenu_instance)
+    if not self.provider:isConfigured() then
+        UIManager:show(InfoMessage:new{
+            text = _("Connect Google Drive first."),
+            timeout = 3,
+        })
+        return
+    end
+
+    local folder, created, err = self.provider:ensureRootFolder()
+
+    if not folder then
+        UIManager:show(InfoMessage:new{
+            text = string.format(
+                _("Cannot initialize KOCloud storage:\n\n%s"),
+                err or _("Unknown error")
+            ),
+        })
+        return
+    end
+
+    self.config:setProviderConfig(
+        self.provider:getType(),
+        self.provider.config
+    )
+    self.config:flush()
+
+    local message
+    if created then
+        message = string.format(
+            _("KOCloud storage created successfully.\n\nFolder: %s"),
+            folder.name
+        )
+    else
+        message = string.format(
+            _("KOCloud storage verified successfully.\n\nFolder: %s"),
+            folder.name
+        )
+    end
+
+    UIManager:show(InfoMessage:new{
+        text = message,
+        timeout = 4,
+    })
+
+    if touchmenu_instance and touchmenu_instance.updateItems then
+        touchmenu_instance:updateItems()
+    end
 end
 
 --- Start Google Drive Device Authorization Flow.
