@@ -35,6 +35,16 @@ function KOCloud:init()
     self.ui.menu:registerToMainMenu(self)
 end
 
+--- Return a human-readable authentication status for the active provider.
+---@return string
+function KOCloud:getAuthStatusText()
+    if self.provider:isConfigured() then
+        return _("Configured")
+    end
+
+    return _("Not configured")
+end
+
 --- Add KOCloud to the KOReader main menu.
 ---@param menu_items table
 function KOCloud:addToMainMenu(menu_items)
@@ -47,10 +57,12 @@ function KOCloud:addToMainMenu(menu_items)
                     _(
                         "Provider: %s\n"
                             .. "Type: %s\n"
+                            .. "OAuth: %s\n"
                             .. "Settings: %s"
                     ),
                     self.provider:getName(),
                     self.provider:getType(),
+                    self:getAuthStatusText(),
                     self.config:getSettingsFile()
                 ),
             })
