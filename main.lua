@@ -790,7 +790,7 @@ end
 function KOCloud:addToMainMenu(menu_items)
     menu_items.kocloud = {
         text = _("KOCloud"),
-        sorting_hint = "more_tools",
+        sorting_hint = "tools",
         sub_item_table_func = function()
             return self:getSubMenuItems()
         end,
