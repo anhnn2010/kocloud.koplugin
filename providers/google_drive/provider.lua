@@ -38,6 +38,11 @@ local STORAGE_FOLDERS = {
     },
 }
 
+local BOOK_MIME_TYPES = {
+    epub = "application/epub+zip",
+    pdf = "application/pdf",
+}
+
 --- Google Drive storage provider for KOCloud.
 ---@class KOCloudGoogleDriveProvider: KOCloudBaseProvider
 ---@field name string Human-readable provider name.
@@ -51,6 +56,39 @@ local GoogleDriveProvider = setmetatable({
 })
 
 GoogleDriveProvider.__index = GoogleDriveProvider
+
+--- Return the basename of a local path.
+---@param path string
+---@return string
+local function basename(path)
+    return path:match("([^/\\]+)$") or path
+end
+
+--- Return the lower-case extension of a file name.
+---@param name string
+---@return string|nil
+local function getExtension(name)
+    local extension = name:match("%.([^%.]+)$")
+
+    if not extension then
+        return nil
+    end
+
+    return extension:lower()
+end
+
+--- Return the MIME type used when uploading a book.
+---@param name string
+---@return string
+local function getBookMimeType(name)
+    local extension = getExtension(name)
+
+    if extension and BOOK_MIME_TYPES[extension] then
+        return BOOK_MIME_TYPES[extension]
+    end
+
+    return "application/octet-stream"
+end
 
 --- Create a new Google Drive provider instance.
 ---@param config? table Google Drive provider configuration.
@@ -89,9 +127,6 @@ function GoogleDriveProvider:pollDeviceAuthorization(session)
 end
 
 --- Return a usable Google OAuth access token.
----
---- A cached token is returned when possible. Otherwise the auth manager
---- refreshes it using the configured refresh token.
 ---@return string|nil access_token
 ---@return string|nil error_message
 function GoogleDriveProvider:getAccessToken()
@@ -99,10 +134,6 @@ function GoogleDriveProvider:getAccessToken()
 end
 
 --- Find the KOCloud-managed root folder in Google Drive.
----
---- The root is identified entirely by private appProperties. This allows the
---- user to rename the visible folder without causing KOCloud to create a
---- duplicate root folder.
 ---@return KOCloudGoogleDriveFile|nil folder
 ---@return string|nil error_message
 function GoogleDriveProvider:findRootFolder()
@@ -139,9 +170,6 @@ function GoogleDriveProvider:findRootFolder()
 end
 
 --- Find or create the KOCloud-managed root folder.
----
---- On success, the discovered folder ID is cached in the provider config.
---- The caller is responsible for persisting the updated provider config.
 ---@return KOCloudGoogleDriveFile|nil folder
 ---@return boolean created True when a new folder was created.
 ---@return string|nil error_message
@@ -273,12 +301,6 @@ function GoogleDriveProvider:ensureManagedFolder(parent_id, definition)
 end
 
 --- Ensure the complete KOCloud Google Drive storage layout exists.
----
---- Existing folders are reused based on private appProperties, even when the
---- user has renamed them. Missing folders are created individually.
----
---- The returned table is keyed by stable local names such as `books` and
---- `backups`. Folder IDs are also cached in `config.folders`.
 ---@return table<string, KOCloudGoogleDriveFile>|nil folders
 ---@return integer created_count Number of folders created during this call.
 ---@return string|nil error_message
@@ -320,10 +342,153 @@ function GoogleDriveProvider:ensureStorageLayout()
     return folders, created_count, nil
 end
 
---- Forget all local user-specific Google OAuth token state.
+--- Return the cached Books folder ID, initializing storage when necessary.
+---@return string|nil folder_id
+---@return string|nil error_message
+function GoogleDriveProvider:getBooksFolderId()
+    local folders = self.config.folders
+
+    if type(folders) == "table"
+        and type(folders.books) == "string"
+        and folders.books ~= ""
+    then
+        return folders.books, nil
+    end
+
+    local storage_folders, _, storage_error =
+        self:ensureStorageLayout()
+
+    if not storage_folders then
+        return nil, storage_error
+    end
+
+    return storage_folders.books.id, nil
+end
+
+--- List all books managed by KOCloud.
 ---
---- This does not revoke the token at Google. Remote revocation will be added
---- separately when the Disconnect flow is implemented.
+--- Results are paginated internally until every matching Drive file has been
+--- collected.
+---@return KOCloudGoogleDriveFile[]|nil books
+---@return string|nil error_message
+function GoogleDriveProvider:listBooks()
+    local books_folder_id, folder_error = self:getBooksFolderId()
+
+    if not books_folder_id then
+        return nil, folder_error
+    end
+
+    local access_token, token_error = self:getAccessToken()
+
+    if not access_token then
+        return nil, token_error
+    end
+
+    local query = string.format(
+        "trashed = false and '%s' in parents "
+            .. "and mimeType != '%s' "
+            .. "and appProperties has { key='%s' and value='book' }",
+        books_folder_id,
+        DriveApi.FOLDER_MIME_TYPE,
+        ROLE_KEY
+    )
+
+    local books = {}
+    local page_token
+
+    repeat
+        local result, list_error = DriveApi:listFiles(
+            access_token,
+            query,
+            {
+                page_size = 100,
+                page_token = page_token,
+                order_by = "name",
+            }
+        )
+
+        if not result then
+            return nil, list_error
+        end
+
+        for _, file in ipairs(result.files) do
+            table.insert(books, file)
+        end
+
+        page_token = result.nextPageToken
+    until not page_token or page_token == ""
+
+    return books, nil
+end
+
+--- Upload a local book into the KOCloud Books folder.
+---@param local_path string Local EPUB/PDF/other book file path.
+---@param remote_name? string Optional Google Drive file name.
+---@return KOCloudGoogleDriveFile|nil book
+---@return string|nil error_message
+function GoogleDriveProvider:uploadBook(local_path, remote_name)
+    if type(local_path) ~= "string" or local_path == "" then
+        return nil, "Local book path is required"
+    end
+
+    local books_folder_id, folder_error = self:getBooksFolderId()
+
+    if not books_folder_id then
+        return nil, folder_error
+    end
+
+    local access_token, token_error = self:getAccessToken()
+
+    if not access_token then
+        return nil, token_error
+    end
+
+    local book_name = remote_name
+    if type(book_name) ~= "string" or book_name == "" then
+        book_name = basename(local_path)
+    end
+
+    return DriveApi:uploadFile(
+        access_token,
+        local_path,
+        book_name,
+        books_folder_id,
+        getBookMimeType(book_name),
+        {
+            [ROLE_KEY] = "book",
+            [SCHEMA_KEY] = SCHEMA_VERSION,
+        }
+    )
+end
+
+--- Download a KOCloud-managed book to a local path.
+---@param file_id string Google Drive book file ID.
+---@param local_path string Local destination path.
+---@return boolean success
+---@return string|nil error_message
+function GoogleDriveProvider:downloadBook(file_id, local_path)
+    if type(file_id) ~= "string" or file_id == "" then
+        return false, "Google Drive book file ID is required"
+    end
+
+    if type(local_path) ~= "string" or local_path == "" then
+        return false, "Local destination path is required"
+    end
+
+    local access_token, token_error = self:getAccessToken()
+
+    if not access_token then
+        return false, token_error
+    end
+
+    return DriveApi:downloadFile(
+        access_token,
+        file_id,
+        local_path
+    )
+end
+
+--- Forget all local user-specific Google OAuth token state.
 function GoogleDriveProvider:clearAuthorization()
     self.auth:clearAuthorization()
 end
