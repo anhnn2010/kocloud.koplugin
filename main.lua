@@ -84,6 +84,18 @@ function KOCloud:init()
         ))
     end
 
+    -- Older KOCloud versions persisted short-lived access-token state.
+    -- Auth removes those legacy keys during construction; save the cleaned
+    -- provider config once so kocloud.lua keeps only long-lived state.
+    if self.provider:isPersistentConfigDirty() then
+        self.config:setProviderConfig(
+            provider_type,
+            self.provider.config
+        )
+        self.config:flush()
+        self.provider:markPersistentConfigSaved()
+    end
+
     self.ui.menu:registerToMainMenu(self)
 end
 
@@ -703,6 +715,7 @@ function KOCloud:pollGoogleDriveAuthorization()
             self.provider.config
         )
         self.config:flush()
+        self.provider:markPersistentConfigSaved()
 
         local menu = self.device_auth_menu
 

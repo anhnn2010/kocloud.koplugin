@@ -30,10 +30,24 @@ local EXPIRY_SAFETY_MARGIN_SECONDS = 60
 ---@field error_message? string Human-readable failure detail.
 
 --- OAuth token manager for the KOCloud Google Drive provider.
+---
+--- Only the long-lived refresh token belongs in persistent KOCloud settings.
+--- Access tokens and their expiry timestamps are session state and are kept
+--- only in memory.
 ---@class KOCloudGoogleDriveAuth
----@field config table User-specific Google Drive token state.
+---@field config table Persistent user-specific Google Drive state.
+---@field access_token? string Short-lived access token kept only in memory.
+---@field expires_at? integer Access-token expiry kept only in memory.
+---@field persistent_config_dirty boolean Whether auth changed persistent config.
 local Auth = {}
 Auth.__index = Auth
+
+local LEGACY_TRANSIENT_KEYS = {
+    "access_token",
+    "expires_at",
+    "scope",
+    "token_type",
+}
 
 --- Encode fields for an application/x-www-form-urlencoded request.
 ---@param fields table<string, string>
@@ -90,12 +104,34 @@ local function postForm(endpoint, fields)
     return tonumber(code), response, nil
 end
 
+--- Remove transient token fields persisted by older KOCloud versions.
+---@param config table
+---@return boolean changed
+local function removeLegacyTransientState(config)
+    local changed = false
+
+    for _, key in ipairs(LEGACY_TRANSIENT_KEYS) do
+        if config[key] ~= nil then
+            config[key] = nil
+            changed = true
+        end
+    end
+
+    return changed
+end
+
 --- Create a Google Drive OAuth token manager.
----@param config? table User-specific Google Drive token state.
+---@param config? table Persistent user-specific Google Drive state.
 ---@return KOCloudGoogleDriveAuth
 function Auth:new(config)
     local instance = setmetatable({}, self)
+
     instance.config = config or {}
+    instance.access_token = nil
+    instance.expires_at = nil
+    instance.persistent_config_dirty =
+        removeLegacyTransientState(instance.config)
+
     return instance
 end
 
@@ -112,17 +148,18 @@ function Auth:isAuthorized()
         and self.config.refresh_token ~= ""
 end
 
---- Return whether this user has completed Google Drive authorization.
----
---- Kept as the public compatibility method used by GoogleDriveProvider.
+--- Return whether persistent auth configuration needs to be saved.
 ---@return boolean
-function Auth:isConfigured()
-    return self:isAuthorized()
+function Auth:isPersistentConfigDirty()
+    return self.persistent_config_dirty
 end
 
---- Return the current mutable user token configuration.
----
---- The caller owns persistence of this table through KOCloudConfig.
+--- Mark persistent auth configuration as saved.
+function Auth:markPersistentConfigSaved()
+    self.persistent_config_dirty = false
+end
+
+--- Return the current mutable persistent user configuration.
 ---@return table
 function Auth:getConfig()
     return self.config
@@ -190,10 +227,6 @@ function Auth:requestDeviceAuthorization()
 end
 
 --- Poll Google once for the result of a device authorization session.
----
---- This method intentionally performs only one request. The UI layer should
---- schedule subsequent calls according to `retry_after` so KOReader remains
---- responsive while the user authorizes from a phone or browser.
 ---@param session KOCloudGoogleDriveDeviceSession
 ---@return KOCloudGoogleDrivePollResult
 function Auth:pollDeviceAuthorization(session)
@@ -233,27 +266,27 @@ function Auth:pollDeviceAuthorization(session)
     end
 
     if code == 200 and type(response.access_token) == "string" then
-        self.config.access_token = response.access_token
-        self.config.refresh_token = response.refresh_token
-            or self.config.refresh_token
+        self.access_token = response.access_token
 
         local expires_in = tonumber(response.expires_in)
         if expires_in then
-            self.config.expires_at = now + expires_in
+            self.expires_at = now + expires_in
         else
-            self.config.expires_at = nil
+            self.expires_at = nil
         end
 
-        self.config.scope = response.scope
-        self.config.token_type = response.token_type
+        local refresh_token = response.refresh_token
 
-        if type(self.config.refresh_token) ~= "string"
-            or self.config.refresh_token == ""
-        then
+        if type(refresh_token) ~= "string" or refresh_token == "" then
             return {
                 status = "error",
                 error_message = "Google did not return a refresh token",
             }
+        end
+
+        if self.config.refresh_token ~= refresh_token then
+            self.config.refresh_token = refresh_token
+            self.persistent_config_dirty = true
         end
 
         return {
@@ -299,25 +332,24 @@ end
 --- Return a cached access token when it is still safely usable.
 ---@return string|nil
 function Auth:getCachedAccessToken()
-    local access_token = self.config.access_token
-    local expires_at = tonumber(self.config.expires_at)
-
-    if type(access_token) ~= "string" or access_token == "" then
+    if type(self.access_token) ~= "string"
+        or self.access_token == ""
+    then
         return nil
     end
 
-    if not expires_at then
+    if not self.expires_at then
         return nil
     end
 
-    if os.time() + EXPIRY_SAFETY_MARGIN_SECONDS >= expires_at then
+    if os.time() + EXPIRY_SAFETY_MARGIN_SECONDS >= self.expires_at then
         return nil
     end
 
-    return access_token
+    return self.access_token
 end
 
---- Exchange the stored refresh token for a new access token.
+--- Exchange the stored refresh token for a new in-memory access token.
 ---@return string|nil access_token
 ---@return string|nil error_message
 function Auth:refreshAccessToken()
@@ -356,24 +388,16 @@ function Auth:refreshAccessToken()
         return nil, "Google OAuth response did not contain an access token"
     end
 
-    self.config.access_token = response.access_token
+    self.access_token = response.access_token
 
     local expires_in = tonumber(response.expires_in)
     if expires_in then
-        self.config.expires_at = os.time() + expires_in
+        self.expires_at = os.time() + expires_in
     else
-        self.config.expires_at = nil
+        self.expires_at = nil
     end
 
-    if type(response.scope) == "string" then
-        self.config.scope = response.scope
-    end
-
-    if type(response.token_type) == "string" then
-        self.config.token_type = response.token_type
-    end
-
-    return self.config.access_token, nil
+    return self.access_token, nil
 end
 
 --- Return a usable Google OAuth access token.
@@ -391,19 +415,20 @@ end
 
 --- Forget short-lived access-token state but keep authorization.
 function Auth:clearCachedAccessToken()
-    self.config.access_token = nil
-    self.config.expires_at = nil
+    self.access_token = nil
+    self.expires_at = nil
 end
 
 --- Forget all user-specific Google OAuth token state.
 ---
 --- This only removes local state. Token revocation will be added separately.
 function Auth:clearAuthorization()
-    self.config.access_token = nil
-    self.config.refresh_token = nil
-    self.config.expires_at = nil
-    self.config.scope = nil
-    self.config.token_type = nil
+    self:clearCachedAccessToken()
+
+    if self.config.refresh_token ~= nil then
+        self.config.refresh_token = nil
+        self.persistent_config_dirty = true
+    end
 end
 
 return Auth

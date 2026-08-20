@@ -112,6 +112,17 @@ function GoogleDriveProvider:isConfigured()
     return self.auth:isAuthorized()
 end
 
+--- Return whether auth changed persistent provider configuration.
+---@return boolean
+function GoogleDriveProvider:isPersistentConfigDirty()
+    return self.auth:isPersistentConfigDirty()
+end
+
+--- Mark persistent auth configuration as saved.
+function GoogleDriveProvider:markPersistentConfigSaved()
+    self.auth:markPersistentConfigSaved()
+end
+
 --- Start a Google Device Authorization Flow session.
 ---@return KOCloudGoogleDriveDeviceSession|nil session
 ---@return string|nil error_message
