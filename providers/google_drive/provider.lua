@@ -25,10 +25,30 @@ function GoogleDriveProvider:new(config)
     return instance
 end
 
---- Return whether Google Drive OAuth is configured.
+--- Return whether the KOCloud application OAuth client is configured.
+---@return boolean
+function GoogleDriveProvider:isClientConfigured()
+    return self.auth:isClientConfigured()
+end
+
+--- Return whether this user has authorized Google Drive.
 ---@return boolean
 function GoogleDriveProvider:isConfigured()
-    return self.auth:isConfigured()
+    return self.auth:isAuthorized()
+end
+
+--- Start a Google Device Authorization Flow session.
+---@return KOCloudGoogleDriveDeviceSession|nil session
+---@return string|nil error_message
+function GoogleDriveProvider:requestDeviceAuthorization()
+    return self.auth:requestDeviceAuthorization()
+end
+
+--- Poll Google once for the result of a device authorization session.
+---@param session KOCloudGoogleDriveDeviceSession
+---@return KOCloudGoogleDrivePollResult
+function GoogleDriveProvider:pollDeviceAuthorization(session)
+    return self.auth:pollDeviceAuthorization(session)
 end
 
 --- Return a usable Google OAuth access token.
@@ -39,6 +59,14 @@ end
 ---@return string|nil error_message
 function GoogleDriveProvider:getAccessToken()
     return self.auth:getAccessToken()
+end
+
+--- Forget all local user-specific Google OAuth token state.
+---
+--- This does not revoke the token at Google. Remote revocation will be added
+--- separately when the Disconnect flow is implemented.
+function GoogleDriveProvider:clearAuthorization()
+    self.auth:clearAuthorization()
 end
 
 return GoogleDriveProvider
