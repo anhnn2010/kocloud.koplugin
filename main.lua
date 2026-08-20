@@ -18,6 +18,7 @@ local KOCloud = WidgetContainer:extend{
 --- and register the plugin in the KOReader main menu.
 function KOCloud:init()
     self.config = Config:new()
+    self.config:ensureDefaults()
 
     local provider_type = self.config:getActiveProvider()
     local provider_config = self.config:getProviderConfig(provider_type)
