@@ -9,6 +9,8 @@ Config.__index = Config
 
 Config.SETTINGS_FILE = DataStorage:getSettingsDir() .. "/kocloud.lua"
 
+local DEFAULT_ACTIVE_PROVIDER = "google_drive"
+
 local KEY_ACTIVE_PROVIDER = "active_provider"
 local KEY_PROVIDERS = "providers"
 
@@ -20,6 +22,28 @@ function Config:new()
     return instance
 end
 
+--- Ensure required KOCloud default settings exist on disk.
+function Config:ensureDefaults()
+    local changed = false
+
+    if self.settings:hasNot(KEY_ACTIVE_PROVIDER) then
+        self.settings:saveSetting(
+            KEY_ACTIVE_PROVIDER,
+            DEFAULT_ACTIVE_PROVIDER
+        )
+        changed = true
+    end
+
+    if self.settings:hasNot(KEY_PROVIDERS) then
+        self.settings:saveSetting(KEY_PROVIDERS, {})
+        changed = true
+    end
+
+    if changed then
+        self.settings:flush()
+    end
+end
+
 --- Return the path to the KOCloud settings file.
 ---@return string
 function Config:getSettingsFile()
@@ -29,7 +53,10 @@ end
 --- Return the currently selected provider type.
 ---@return string
 function Config:getActiveProvider()
-    return self.settings:readSetting(KEY_ACTIVE_PROVIDER, "google_drive")
+    return self.settings:readSetting(
+        KEY_ACTIVE_PROVIDER,
+        DEFAULT_ACTIVE_PROVIDER
+    )
 end
 
 --- Set the currently selected provider type.
