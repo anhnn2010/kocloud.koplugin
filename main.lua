@@ -4,10 +4,12 @@ local Device = require("device")
 local filemanagerutil = require("apps/filemanager/filemanagerutil")
 local GoogleDriveProvider = require("providers/google_drive/provider")
 local InfoMessage = require("ui/widget/infomessage")
+local Menu = require("ui/widget/menu")
 local NetworkMgr = require("ui/network/manager")
 local QRMessage = require("ui/widget/qrmessage")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
+local util = require("util")
 local _ = require("gettext")
 
 local EXPECTED_MANAGED_FOLDER_COUNT = 4
@@ -150,6 +152,15 @@ function KOCloud:getSubMenuItems()
 
         if self:isStorageInitialized() then
             table.insert(items, {
+                text = _("My Books"),
+                callback = function()
+                    NetworkMgr:runWhenOnline(function()
+                        self:showBooks()
+                    end)
+                end,
+            })
+
+            table.insert(items, {
                 text = _("Upload book"),
                 callback = function()
                     self:chooseBookForUpload()
@@ -200,6 +211,96 @@ function KOCloud:showStatus()
             self.config:getSettingsFile()
         ),
     })
+end
+
+--- Show all KOCloud-managed books in a paginated KOReader menu.
+function KOCloud:showBooks()
+    local loading_message = InfoMessage:new{
+        text = _("Loading KOCloud books…"),
+    }
+
+    UIManager:show(loading_message)
+
+    UIManager:scheduleIn(0.1, function()
+        local books, err = self.provider:listBooks()
+
+        UIManager:close(loading_message)
+
+        if not books then
+            UIManager:show(InfoMessage:new{
+                text = string.format(
+                    _("Cannot load KOCloud books:\n\n%s"),
+                    err or _("Unknown error")
+                ),
+            })
+            return
+        end
+
+        if #books == 0 then
+            UIManager:show(InfoMessage:new{
+                text = _("No books have been uploaded to KOCloud yet."),
+                timeout = 4,
+            })
+            return
+        end
+
+        local item_table = {}
+
+        for _, book in ipairs(books) do
+            table.insert(item_table, {
+                text = book.name,
+                book = book,
+            })
+        end
+
+        local books_menu
+
+        books_menu = Menu:new{
+            title = string.format(
+                _("My Books (%d)"),
+                #books
+            ),
+            item_table = item_table,
+            items_max_lines = 2,
+        }
+
+        --- Show metadata for a selected book.
+        --- Download will be wired into this selection in the next step.
+        ---@param item table
+        function books_menu:onMenuSelect(item)
+            local book = item.book
+
+            if not book then
+                return
+            end
+
+            local size_text = _("Unknown")
+
+            if book.size then
+                local size = tonumber(book.size)
+                if size then
+                    size_text = util.getFriendlySize(size)
+                end
+            end
+
+            UIManager:show(InfoMessage:new{
+                text = string.format(
+                    _(
+                        "Name: %s\n"
+                            .. "Size: %s\n"
+                            .. "Modified: %s\n"
+                            .. "Drive file ID: %s"
+                    ),
+                    book.name or _("Unknown"),
+                    size_text,
+                    book.modifiedTime or _("Unknown"),
+                    book.id or _("Unknown")
+                ),
+            })
+        end
+
+        UIManager:show(books_menu)
+    end)
 end
 
 --- Open KOReader's file chooser for a local EPUB or PDF.
