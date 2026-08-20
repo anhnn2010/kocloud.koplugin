@@ -1,5 +1,12 @@
+local DriveApi = require("providers/google_drive/api")
 local Auth = require("providers/google_drive/auth")
 local BaseProvider = require("providers/base")
+
+local ROOT_FOLDER_NAME = "KOCloud"
+local ROOT_ROLE_KEY = "kocloud_role"
+local ROOT_ROLE_VALUE = "root"
+local ROOT_SCHEMA_KEY = "kocloud_schema"
+local ROOT_SCHEMA_VERSION = "1"
 
 --- Google Drive storage provider for KOCloud.
 ---@class KOCloudGoogleDriveProvider: KOCloudBaseProvider
@@ -59,6 +66,92 @@ end
 ---@return string|nil error_message
 function GoogleDriveProvider:getAccessToken()
     return self.auth:getAccessToken()
+end
+
+--- Find the KOCloud-managed root folder in Google Drive.
+---
+--- The folder is identified by private appProperties rather than by name
+--- alone, so a user's unrelated folder named "KOCloud" is ignored.
+---@return KOCloudGoogleDriveFile|nil folder
+---@return string|nil error_message
+function GoogleDriveProvider:findRootFolder()
+    local access_token, token_error = self:getAccessToken()
+
+    if not access_token then
+        return nil, token_error
+    end
+
+    local query = string.format(
+        "trashed = false and name = '%s' "
+            .. "and mimeType = '%s' "
+            .. "and appProperties has { key='%s' and value='%s' }",
+        ROOT_FOLDER_NAME,
+        DriveApi.FOLDER_MIME_TYPE,
+        ROOT_ROLE_KEY,
+        ROOT_ROLE_VALUE
+    )
+
+    local result, list_error = DriveApi:listFiles(
+        access_token,
+        query,
+        {
+            page_size = 10,
+        }
+    )
+
+    if not result then
+        return nil, list_error
+    end
+
+    if #result.files == 0 then
+        return nil, nil
+    end
+
+    return result.files[1], nil
+end
+
+--- Find or create the KOCloud-managed root folder.
+---
+--- On success, the discovered folder ID is cached in the provider config.
+--- The caller is responsible for persisting the updated provider config.
+---@return KOCloudGoogleDriveFile|nil folder
+---@return boolean created True when a new folder was created.
+---@return string|nil error_message
+function GoogleDriveProvider:ensureRootFolder()
+    local folder, find_error = self:findRootFolder()
+
+    if find_error then
+        return nil, false, find_error
+    end
+
+    if folder then
+        self.config.root_folder_id = folder.id
+        return folder, false, nil
+    end
+
+    local access_token, token_error = self:getAccessToken()
+
+    if not access_token then
+        return nil, false, token_error
+    end
+
+    local created_folder, create_error = DriveApi:createFolder(
+        access_token,
+        ROOT_FOLDER_NAME,
+        nil,
+        {
+            [ROOT_ROLE_KEY] = ROOT_ROLE_VALUE,
+            [ROOT_SCHEMA_KEY] = ROOT_SCHEMA_VERSION,
+        }
+    )
+
+    if not created_folder then
+        return nil, false, create_error
+    end
+
+    self.config.root_folder_id = created_folder.id
+
+    return created_folder, true, nil
 end
 
 --- Forget all local user-specific Google OAuth token state.
