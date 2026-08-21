@@ -158,10 +158,19 @@ function KOCloud:getStorageStatusText()
     return _("Not initialized")
 end
 
---- Return the Google Drive authentication/setup submenu items.
+--- Return the Google Drive provider submenu items.
 ---@return table
-function KOCloud:getGoogleDriveSetupMenuItems()
+function KOCloud:getGoogleDriveMenuItems()
     local items = {
+        {
+            text_func = function()
+                return string.format(
+                    _("Connection: %s"),
+                    self:getAuthStatusText()
+                )
+            end,
+            enabled = false,
+        },
         {
             text_func = function()
                 local status = self.provider:isClientConfigured()
@@ -171,6 +180,15 @@ function KOCloud:getGoogleDriveSetupMenuItems()
                 return string.format(
                     _("OAuth credentials: %s"),
                     status
+                )
+            end,
+            enabled = false,
+        },
+        {
+            text_func = function()
+                return string.format(
+                    _("Storage: %s"),
+                    self:getStorageStatusText()
                 )
             end,
             enabled = false,
@@ -237,6 +255,24 @@ function KOCloud:getGoogleDriveSetupMenuItems()
 
     if self.provider:isConfigured() then
         table.insert(items, {
+            text_func = function()
+                if self:isStorageInitialized() then
+                    return _("Verify provider storage")
+                end
+
+                return _("Initialize provider storage")
+            end,
+            keep_menu_open = true,
+            callback = function(touchmenu_instance)
+                NetworkMgr:runWhenOnline(function()
+                    self:initializeGoogleDriveStorage(
+                        touchmenu_instance
+                    )
+                end)
+            end,
+        })
+
+        table.insert(items, {
             text = _("Disconnect Google Drive"),
             keep_menu_open = true,
             callback = function(touchmenu_instance)
@@ -261,7 +297,7 @@ function KOCloud:getGoogleDriveSetupMenuItems()
 
     table.insert(items, {
         text = _("Setup help"),
-            keep_menu_open = true,
+        keep_menu_open = true,
         callback = function()
             self:showGoogleDriveSetupHelp()
         end,
@@ -270,10 +306,10 @@ function KOCloud:getGoogleDriveSetupMenuItems()
     return items
 end
 
---- Return the KOCloud submenu items.
+--- Return configured/available cloud provider menu items.
 ---@return table
-function KOCloud:getSubMenuItems()
-    local items = {
+function KOCloud:getCloudProvidersMenuItems()
+    return {
         {
             text_func = function()
                 return string.format(
@@ -281,65 +317,95 @@ function KOCloud:getSubMenuItems()
                     self:getAuthStatusText()
                 )
             end,
-            enabled = false,
+            sub_item_table_func = function()
+                return self:getGoogleDriveMenuItems()
+            end,
+        },
+    }
+end
+
+--- Return Library service menu items.
+---@return table
+function KOCloud:getLibraryMenuItems()
+    local ready = self.provider:isConfigured()
+        and self:isStorageInitialized()
+
+    local items = {
+        {
+            text = _("My Books"),
+            enabled = ready,
+            keep_menu_open = true,
+            callback = function()
+                NetworkMgr:runWhenOnline(function()
+                    self:showBooks()
+                end)
+            end,
         },
         {
-            text = _("Google Drive setup"),
-            sub_item_table_func = function()
-                return self:getGoogleDriveSetupMenuItems()
+            text = _("Upload book"),
+            enabled = ready,
+            keep_menu_open = true,
+            callback = function()
+                self:chooseBookForUpload()
             end,
         },
     }
 
-    if self.provider:isConfigured() then
+    if not ready then
         table.insert(items, {
-            text_func = function()
-                if self:isStorageInitialized() then
-                    return _("Verify storage")
-                end
-
-                return _("Initialize storage")
-            end,
-            keep_menu_open = true,
-            callback = function(touchmenu_instance)
-                NetworkMgr:runWhenOnline(function()
-                    self:initializeGoogleDriveStorage(
-                        touchmenu_instance
-                    )
-                end)
-            end,
+            text = _(
+                "Configure a cloud provider and initialize its storage "
+                    .. "to use the library."
+            ),
+            enabled = false,
+            separator = true,
         })
-
-        if self:isStorageInitialized() then
-            table.insert(items, {
-                text = _("My Books"),
-            keep_menu_open = true,
-                callback = function()
-                    NetworkMgr:runWhenOnline(function()
-                        self:showBooks()
-                    end)
-                end,
-            })
-
-            table.insert(items, {
-                text = _("Upload book"),
-            keep_menu_open = true,
-                callback = function()
-                    self:chooseBookForUpload()
-                end,
-            })
-        end
     end
 
-    table.insert(items, {
-        text = _("Status"),
-            keep_menu_open = true,
-        callback = function()
-            self:showStatus()
-        end,
-    })
-
     return items
+end
+
+--- Return KOCloud settings and status menu items.
+---@return table
+function KOCloud:getSettingsAndStatusMenuItems()
+    return {
+        {
+            text = _("Status"),
+            keep_menu_open = true,
+            callback = function()
+                self:showStatus()
+            end,
+        },
+    }
+end
+
+--- Return the KOCloud root submenu.
+---
+--- Keep this level provider-agnostic. Root entries represent stable KOCloud
+--- feature areas; provider-specific configuration belongs under
+--- "Cloud providers".
+---@return table
+function KOCloud:getSubMenuItems()
+    return {
+        {
+            text = _("Library"),
+            sub_item_table_func = function()
+                return self:getLibraryMenuItems()
+            end,
+        },
+        {
+            text = _("Cloud providers"),
+            sub_item_table_func = function()
+                return self:getCloudProvidersMenuItems()
+            end,
+        },
+        {
+            text = _("Settings & status"),
+            sub_item_table_func = function()
+                return self:getSettingsAndStatusMenuItems()
+            end,
+        },
+    }
 end
 
 --- Start a temporary LAN web page for entering OAuth credentials by phone.
