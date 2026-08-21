@@ -106,6 +106,60 @@ function GoogleDriveProvider:isClientConfigured()
     return self.auth:isClientConfigured()
 end
 
+--- Return the KOReader settings file used for OAuth application credentials.
+---@return string
+function GoogleDriveProvider:getOAuthCredentialSettingsFile()
+    return self.auth:getClientSettingsFile()
+end
+
+--- Import Google OAuth application credentials from a downloaded JSON file.
+---
+--- If the OAuth client changes, cached Google Drive folder IDs are also
+--- cleared because the next authorization may point to a different account.
+---@param json_path string
+---@return table|nil credentials
+---@return boolean changed
+---@return string|nil error_message
+function GoogleDriveProvider:importOAuthCredentials(json_path)
+    local credentials, changed, import_error =
+        self.auth:importClientCredentials(json_path)
+
+    if not credentials then
+        return nil, false, import_error
+    end
+
+    if changed then
+        self.config.root_folder_id = nil
+        self.config.folders = nil
+    end
+
+    return credentials, changed, nil
+end
+
+--- Disconnect Google Drive and clear account-specific cached folder IDs.
+function GoogleDriveProvider:disconnect()
+    self.auth:clearAuthorization()
+    self.config.root_folder_id = nil
+    self.config.folders = nil
+end
+
+--- Remove OAuth application credentials and all account-specific local state.
+---@return boolean success
+---@return string|nil error_message
+function GoogleDriveProvider:clearOAuthCredentials()
+    local success, clear_error =
+        self.auth:clearClientCredentials()
+
+    if not success then
+        return false, clear_error
+    end
+
+    self.config.root_folder_id = nil
+    self.config.folders = nil
+
+    return true, nil
+end
+
 --- Return whether this user has authorized Google Drive.
 ---@return boolean
 function GoogleDriveProvider:isConfigured()

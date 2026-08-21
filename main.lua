@@ -39,6 +39,13 @@ local function isSupportedBookFile(filename)
         or lower_name:match("%.pdf$") ~= nil
 end
 
+--- Return whether a local file can contain Google OAuth credentials.
+---@param filename string
+---@return boolean
+local function isOAuthCredentialsJsonFile(filename)
+    return filename:lower():match("%.json$") ~= nil
+end
+
 --- Convert a Google Drive file name into a safe local file name.
 ---@param name string
 ---@return string
@@ -147,6 +154,86 @@ function KOCloud:getStorageStatusText()
     return _("Not initialized")
 end
 
+--- Return the Google Drive authentication/setup submenu items.
+---@return table
+function KOCloud:getGoogleDriveSetupMenuItems()
+    local items = {
+        {
+            text_func = function()
+                local status = self.provider:isClientConfigured()
+                        and _("Configured")
+                    or _("Not configured")
+
+                return string.format(
+                    _("OAuth credentials: %s"),
+                    status
+                )
+            end,
+            enabled = false,
+        },
+        {
+            text_func = function()
+                if self.provider:isClientConfigured() then
+                    return _("Replace OAuth credentials (JSON)")
+                end
+
+                return _("Import OAuth credentials (JSON)")
+            end,
+            callback = function(touchmenu_instance)
+                self:chooseOAuthCredentialsFile(
+                    touchmenu_instance
+                )
+            end,
+        },
+    }
+
+    if self.provider:isClientConfigured()
+        and not self.provider:isConfigured()
+    then
+        table.insert(items, {
+            text = _("Connect Google Drive"),
+            callback = function(touchmenu_instance)
+                NetworkMgr:runWhenOnline(function()
+                    self:startGoogleDriveAuthorization(
+                        touchmenu_instance
+                    )
+                end)
+            end,
+        })
+    end
+
+    if self.provider:isConfigured() then
+        table.insert(items, {
+            text = _("Disconnect Google Drive"),
+            callback = function(touchmenu_instance)
+                self:confirmDisconnectGoogleDrive(
+                    touchmenu_instance
+                )
+            end,
+        })
+    end
+
+    if self.provider:isClientConfigured() then
+        table.insert(items, {
+            text = _("Remove OAuth credentials"),
+            callback = function(touchmenu_instance)
+                self:confirmRemoveOAuthCredentials(
+                    touchmenu_instance
+                )
+            end,
+        })
+    end
+
+    table.insert(items, {
+        text = _("Setup help"),
+        callback = function()
+            self:showGoogleDriveSetupHelp()
+        end,
+    })
+
+    return items
+end
+
 --- Return the KOCloud submenu items.
 ---@return table
 function KOCloud:getSubMenuItems()
@@ -160,20 +247,15 @@ function KOCloud:getSubMenuItems()
             end,
             enabled = false,
         },
+        {
+            text = _("Google Drive setup"),
+            sub_item_table_func = function()
+                return self:getGoogleDriveSetupMenuItems()
+            end,
+        },
     }
 
-    if not self.provider:isConfigured() then
-        table.insert(items, {
-            text = _("Connect Google Drive"),
-            callback = function(touchmenu_instance)
-                NetworkMgr:runWhenOnline(function()
-                    self:startGoogleDriveAuthorization(
-                        touchmenu_instance
-                    )
-                end)
-            end,
-        })
-    else
+    if self.provider:isConfigured() then
         table.insert(items, {
             text_func = function()
                 if self:isStorageInitialized() then
@@ -220,6 +302,181 @@ function KOCloud:getSubMenuItems()
     return items
 end
 
+--- Open KOReader's file chooser for Google's downloaded OAuth JSON file.
+---@param touchmenu_instance? table
+function KOCloud:chooseOAuthCredentialsFile(touchmenu_instance)
+    local title_header = _("Choose Google OAuth credentials JSON")
+
+    local caller_callback = function(json_path)
+        self:importOAuthCredentials(
+            json_path,
+            touchmenu_instance
+        )
+    end
+
+    filemanagerutil.showChooseDialog(
+        title_header,
+        caller_callback,
+        nil,
+        filemanagerutil.getHomeFolder(),
+        isOAuthCredentialsJsonFile
+    )
+end
+
+--- Import and persist Google OAuth application credentials.
+---@param json_path string
+---@param touchmenu_instance? table
+function KOCloud:importOAuthCredentials(
+    json_path,
+    touchmenu_instance
+)
+    local credentials, changed, import_error =
+        self.provider:importOAuthCredentials(json_path)
+
+    if not credentials then
+        UIManager:show(InfoMessage:new{
+            text = string.format(
+                _("Cannot import OAuth credentials:\n\n%s"),
+                import_error or _("Unknown error")
+            ),
+        })
+        return
+    end
+
+    -- Replacing the OAuth client clears authorization and cached Drive folder
+    -- IDs. Persist that cleanup immediately.
+    if changed then
+        self.config:setProviderConfig(
+            self.provider:getType(),
+            self.provider.config
+        )
+        self.config:flush()
+        self.provider:markPersistentConfigSaved()
+    end
+
+    local message = _(
+        "Google OAuth credentials imported successfully."
+    )
+
+    if changed and not self.provider:isConfigured() then
+        message = message
+            .. "\n\n"
+            .. _("You can now connect Google Drive.")
+    end
+
+    UIManager:show(InfoMessage:new{
+        text = message,
+        timeout = 4,
+    })
+
+    if touchmenu_instance and touchmenu_instance.updateItems then
+        touchmenu_instance:updateItems()
+    end
+end
+
+--- Confirm disconnecting the currently authorized Google Drive account.
+---@param touchmenu_instance? table
+function KOCloud:confirmDisconnectGoogleDrive(
+    touchmenu_instance
+)
+    UIManager:show(ConfirmBox:new{
+        text = _(
+            "Disconnect Google Drive on this device?\n\n"
+                .. "Your files in Google Drive will not be deleted."
+        ),
+        ok_text = _("Disconnect"),
+        ok_callback = function()
+            self.provider:disconnect()
+
+            self.config:setProviderConfig(
+                self.provider:getType(),
+                self.provider.config
+            )
+            self.config:flush()
+            self.provider:markPersistentConfigSaved()
+
+            if touchmenu_instance
+                and touchmenu_instance.updateItems
+            then
+                touchmenu_instance:updateItems()
+            end
+
+            UIManager:show(InfoMessage:new{
+                text = _("Google Drive disconnected."),
+                timeout = 3,
+            })
+        end,
+    })
+end
+
+--- Confirm removal of the user's Google OAuth application credentials.
+---@param touchmenu_instance? table
+function KOCloud:confirmRemoveOAuthCredentials(
+    touchmenu_instance
+)
+    UIManager:show(ConfirmBox:new{
+        text = _(
+            "Remove Google OAuth credentials from this device?\n\n"
+                .. "This also disconnects Google Drive locally. "
+                .. "Files in Google Drive will not be deleted."
+        ),
+        ok_text = _("Remove"),
+        ok_callback = function()
+            local success, clear_error =
+                self.provider:clearOAuthCredentials()
+
+            if not success then
+                UIManager:show(InfoMessage:new{
+                    text = string.format(
+                        _(
+                            "Cannot remove OAuth credentials:\n\n%s"
+                        ),
+                        clear_error or _("Unknown error")
+                    ),
+                })
+                return
+            end
+
+            self.config:setProviderConfig(
+                self.provider:getType(),
+                self.provider.config
+            )
+            self.config:flush()
+            self.provider:markPersistentConfigSaved()
+
+            if touchmenu_instance
+                and touchmenu_instance.updateItems
+            then
+                touchmenu_instance:updateItems()
+            end
+
+            UIManager:show(InfoMessage:new{
+                text = _("Google OAuth credentials removed."),
+                timeout = 3,
+            })
+        end,
+    })
+end
+
+--- Show the one-time Google Cloud setup instructions for KOCloud.
+function KOCloud:showGoogleDriveSetupHelp()
+    UIManager:show(InfoMessage:new{
+        text = _(
+            "Google Drive setup\n\n"
+                .. "1. Create a Google Cloud project.\n"
+                .. "2. Enable Google Drive API.\n"
+                .. "3. Create an OAuth client of type "
+                .. "\"TVs and Limited Input devices\".\n"
+                .. "4. Download the OAuth client JSON file.\n"
+                .. "5. Import that JSON file here.\n"
+                .. "6. Connect Google Drive and authorize on your phone.\n\n"
+                .. "For long-term use, publish the OAuth app to "
+                .. "In production. OAuth apps left in Testing can issue "
+                .. "refresh tokens that expire after 7 days."
+        ),
+    })
+end
+
 --- Show KOCloud provider, OAuth, and storage status information.
 function KOCloud:showStatus()
     local client_status = self.provider:isClientConfigured()
@@ -239,7 +496,8 @@ function KOCloud:showStatus()
                     .. "Storage: %s\n"
                     .. "Managed folders: %d/%d\n"
                     .. "Root folder ID: %s\n"
-                    .. "Settings: %s"
+                    .. "Settings: %s\n"
+                    .. "OAuth credentials: %s"
             ),
             self.provider:getName(),
             self.provider:getType(),
@@ -249,7 +507,8 @@ function KOCloud:showStatus()
             self:getManagedFolderCount(),
             EXPECTED_MANAGED_FOLDER_COUNT,
             root_folder_id,
-            self.config:getSettingsFile()
+            self.config:getSettingsFile(),
+            self.provider:getOAuthCredentialSettingsFile()
         ),
     })
 end

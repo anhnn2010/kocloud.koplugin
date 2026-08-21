@@ -141,6 +141,44 @@ function Auth:isClientConfigured()
     return OAuthClient:isConfigured()
 end
 
+--- Return the KOReader settings file that stores OAuth application credentials.
+---@return string
+function Auth:getClientSettingsFile()
+    return OAuthClient:getSettingsFile()
+end
+
+--- Import a Google OAuth credentials JSON file.
+---
+--- When credentials change, the existing refresh token can no longer be
+--- assumed to belong to the same OAuth client, so local authorization state
+--- is cleared and the user must authorize again.
+---@param json_path string
+---@return table|nil credentials
+---@return boolean changed
+---@return string|nil error_message
+function Auth:importClientCredentials(json_path)
+    local credentials, import_error =
+        OAuthClient:importFromJsonFile(json_path)
+
+    if not credentials then
+        return nil, false, import_error
+    end
+
+    if credentials.changed and self:isAuthorized() then
+        self:clearAuthorization()
+    end
+
+    return credentials, credentials.changed, nil
+end
+
+--- Remove saved OAuth application credentials and local authorization state.
+---@return boolean success
+---@return string|nil error_message
+function Auth:clearClientCredentials()
+    self:clearAuthorization()
+    return OAuthClient:clearCredentials()
+end
+
 --- Return whether this user has already connected Google Drive.
 ---@return boolean
 function Auth:isAuthorized()
