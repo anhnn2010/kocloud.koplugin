@@ -58,27 +58,48 @@ local function htmlEscape(value)
         :gsub("'", "&#39;")
 end
 
---- Generate a random pairing token.
+--- Generate a short, human-friendly random pairing token.
+---
+--- Eight characters from a 32-symbol alphabet provide 40 bits of entropy.
+--- That is ample for a temporary LAN-only setup link that expires after
+--- five minutes, while remaining practical to type manually.
 ---@return string
 local function generateToken()
+    local alphabet = "23456789abcdefghjkmnpqrstuvwxyz"
+    local token_length = 8
+
     local file = io.open("/dev/urandom", "rb")
 
     if file then
-        local bytes = file:read(16)
+        local bytes = file:read(token_length)
         file:close()
 
-        if bytes and #bytes == 16 then
-            return (bytes:gsub(".", function(char)
-                return string.format("%02x", string.byte(char))
-            end))
+        if bytes and #bytes == token_length then
+            local chars = {}
+
+            for index = 1, token_length do
+                local byte = string.byte(bytes, index)
+                local position = (byte % #alphabet) + 1
+                chars[index] = alphabet:sub(position, position)
+            end
+
+            return table.concat(chars)
         end
     end
 
-    local raw = tostring(socket.gettime())
-        .. tostring({})
-        .. tostring(os.time())
+    -- Fallback for unusual platforms without /dev/urandom.
+    math.randomseed(
+        math.floor(socket.gettime() * 1000000) + os.time()
+    )
 
-    return (raw:gsub("[^%w]", "")):sub(1, 32)
+    local chars = {}
+
+    for index = 1, token_length do
+        local position = math.random(1, #alphabet)
+        chars[index] = alphabet:sub(position, position)
+    end
+
+    return table.concat(chars)
 end
 
 --- Decode application/x-www-form-urlencoded text.
@@ -213,7 +234,7 @@ function OAuthSetupServer:getSetupURL()
     end
 
     return string.format(
-        "http://%s:%d/setup/%s",
+        "http://%s:%d/s/%s",
         ip,
         self.port,
         self.token
@@ -406,7 +427,7 @@ Use only on a trusted Wi-Fi network. The server shuts down after saving
 or after five minutes.
 </p>
 
-<form method="post" action="/save/%s">
+<form method="post" action="/v/%s">
 <label for="file">Google OAuth credentials JSON</label>
 <input id="file" type="file" accept=".json,application/json">
 <p>Choose the JSON downloaded from Google Cloud. Your browser reads it locally.</p>
@@ -562,8 +583,8 @@ function OAuthSetupServer:onRequest(data, request_id)
     end
 
     -- Route by path token instead of a query parameter.
-    local setup_token = uri:match("^/setup/([0-9a-fA-F]+)")
-    local save_token = uri:match("^/save/([0-9a-fA-F]+)")
+    local setup_token = uri:match("^/s/([23456789abcdefghjkmnpqrstuvwxyz]+)")
+    local save_token = uri:match("^/v/([23456789abcdefghjkmnpqrstuvwxyz]+)")
 
     if method == "GET" and setup_token then
         if setup_token ~= self.token then

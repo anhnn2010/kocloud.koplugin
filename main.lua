@@ -8,6 +8,7 @@ local InfoMessage = require("ui/widget/infomessage")
 local lfs = require("libs/libkoreader-lfs")
 local Menu = require("ui/widget/menu")
 local NetworkMgr = require("ui/network/manager")
+local OAuthSetupDialog = require("core/oauth_setup_dialog")
 local OAuthSetupServer = require("core/oauth_setup_server")
 local QRMessage = require("ui/widget/qrmessage")
 local UIManager = require("ui/uimanager")
@@ -183,10 +184,10 @@ function KOCloud:getGoogleDriveSetupMenuItems()
                             if self.oauth_setup_server
                                 and self.oauth_setup_server:isRunning()
                             then
-                                return _("From phone: Show QR code")
+                                return _("From browser: Show QR code")
                             end
 
-                            return _("From phone")
+                            return _("From browser (phone or computer)")
                         end,
                         keep_menu_open = true,
                         callback = function(touchmenu_instance)
@@ -444,31 +445,23 @@ function KOCloud:startPhoneOAuthSetup(touchmenu_instance)
 
     self.oauth_setup_server = server
 
-    UIManager:show(InfoMessage:new{
-        text = _(
-            "KOCloud will temporarily accept OAuth credentials "
-                .. "from your phone over the local network.\n\n"
-                .. "Use this only on a trusted Wi-Fi network. "
-                .. "The setup server stops automatically after "
-                .. "saving or after 5 minutes."
-        ),
-        timeout = 4,
-    })
+    if touchmenu_instance and touchmenu_instance.updateItems then
+        touchmenu_instance:updateItems()
+    end
 
-    UIManager:scheduleIn(0.2, function()
+    -- Show the QR directly. Do not stack a timed InfoMessage underneath it:
+    -- QRMessage closes on any tap, and an underlying timed message would
+    -- briefly flash on screen after the QR is dismissed.
+    UIManager:nextTick(function()
         if self.oauth_setup_server == server
             and server:isRunning()
         then
             self:showPhoneOAuthSetupQR()
         end
     end)
-
-    if touchmenu_instance and touchmenu_instance.updateItems then
-        touchmenu_instance:updateItems()
-    end
 end
 
---- Show the QR code for the currently running phone OAuth setup server.
+--- Show a compact QR + URL dialog for the current phone setup session.
 function KOCloud:showPhoneOAuthSetupQR()
     local server = self.oauth_setup_server
 
@@ -496,22 +489,19 @@ function KOCloud:showPhoneOAuthSetupQR()
         UIManager:close(self.oauth_setup_qr)
     end
 
-    local qr
+    local dialog
 
-    qr = QRMessage:new{
-        text = setup_url,
-        width = Device.screen:getWidth(),
-        height = Device.screen:getHeight(),
-        timeout = OAuthSetupServer.TIMEOUT_SECONDS,
-        dismiss_callback = function()
-            if self.oauth_setup_qr == qr then
+    dialog = OAuthSetupDialog:new{
+        setup_url = setup_url,
+        close_callback = function()
+            if self.oauth_setup_qr == dialog then
                 self.oauth_setup_qr = nil
             end
         end,
     }
 
-    self.oauth_setup_qr = qr
-    UIManager:show(qr)
+    self.oauth_setup_qr = dialog
+    UIManager:show(dialog)
 end
 
 --- Stop any temporary phone OAuth setup server and QR dialog.
@@ -695,9 +685,10 @@ function KOCloud:showGoogleDriveSetupHelp()
                 .. "\"TVs and Limited Input devices\".\n"
                 .. "4. Download the OAuth client JSON file.\n"
                 .. "5. Open Configure OAuth credentials.\n\n"
-                .. "Recommended: From phone\n"
-                .. "Scan the QR code and choose the JSON file "
-                .. "directly on your phone.\n\n"
+                .. "Recommended: From browser (phone or computer)\n"
+                .. "Scan the QR code with your phone, or open the setup address "
+                .. "on a computer or another device on the same Wi-Fi network. "
+                .. "Then choose the JSON file in that browser.\n\n"
                 .. "Fallback: From KOReader storage (JSON file)\n"
                 .. "First copy the downloaded JSON file into the "
                 .. "KOReader device storage, then select it using "
