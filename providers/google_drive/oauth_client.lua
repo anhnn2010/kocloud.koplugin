@@ -2,9 +2,9 @@ local DataStorage = require("datastorage")
 local JSON = require("json")
 local LuaSettings = require("luasettings")
 
---- Google OAuth client configuration for KOCloud.
+--- Google OAuth / Picker application configuration for KOCloud.
 ---
---- Each KOCloud user owns their own Google OAuth client. Credentials are
+--- Each KOCloud user owns their own Google Cloud project. Configuration is
 --- stored outside the plugin in KOReader's settings directory:
 ---   <KOReader settings>/kocloud_oauth_client.lua
 ---
@@ -21,6 +21,8 @@ OAuthClient.SCOPES = {
 
 OAuthClient.CLIENT_ID = nil
 OAuthClient.CLIENT_SECRET = nil
+OAuthClient.PICKER_API_KEY = nil
+OAuthClient.APP_ID = nil
 
 --- Return a non-empty string, otherwise nil.
 ---@param value any
@@ -33,19 +35,41 @@ local function nonEmptyString(value)
     return nil
 end
 
---- Read the currently saved OAuth client credentials from KOReader settings.
+--- Derive the Google Cloud project number used by PickerBuilder.setAppId().
+---
+--- Google OAuth client IDs normally begin with the Cloud project number,
+--- for example:
+---   1234567890-abc.apps.googleusercontent.com
+---   1234567890.apps.googleusercontent.com
+---@param client_id string|nil
+---@return string|nil
+local function deriveAppId(client_id)
+    if type(client_id) ~= "string" then
+        return nil
+    end
+
+    return client_id:match("^(%d+)[%-.]")
+end
+
+--- Read the currently saved Google application configuration.
 ---@return string|nil client_id
 ---@return string|nil client_secret
+---@return string|nil picker_api_key
 local function readSavedCredentials()
     local settings = LuaSettings:open(OAuthClient.SETTINGS_FILE)
 
     return nonEmptyString(settings:readSetting("client_id")),
-        nonEmptyString(settings:readSetting("client_secret"))
+        nonEmptyString(settings:readSetting("client_secret")),
+        nonEmptyString(settings:readSetting("picker_api_key"))
 end
 
---- Load saved OAuth client credentials into this module.
+--- Load saved Google application configuration into this module.
 function OAuthClient:reload()
-    self.CLIENT_ID, self.CLIENT_SECRET = readSavedCredentials()
+    self.CLIENT_ID,
+        self.CLIENT_SECRET,
+        self.PICKER_API_KEY = readSavedCredentials()
+
+    self.APP_ID = deriveAppId(self.CLIENT_ID)
 end
 
 --- Return whether OAuth application credentials are available.
@@ -53,6 +77,14 @@ end
 function OAuthClient:isConfigured()
     return self.CLIENT_ID ~= nil
         and self.CLIENT_SECRET ~= nil
+end
+
+--- Return whether Google Picker configuration is complete.
+---@return boolean
+function OAuthClient:isPickerConfigured()
+    return self:isConfigured()
+        and self.PICKER_API_KEY ~= nil
+        and self.APP_ID ~= nil
 end
 
 --- Return the credential settings file used by KOCloud.
@@ -67,14 +99,36 @@ function OAuthClient:getScopeString()
     return table.concat(self.SCOPES, " ")
 end
 
---- Save OAuth application credentials to KOReader settings.
+--- Return Google Picker configuration.
+---@return table|nil config
+function OAuthClient:getPickerConfig()
+    if not self:isPickerConfigured() then
+        return nil
+    end
+
+    return {
+        api_key = self.PICKER_API_KEY,
+        app_id = self.APP_ID,
+    }
+end
+
+--- Save Google OAuth credentials and optional Picker API key.
+---
+--- When the OAuth client changes and no new Picker key is supplied, the old
+--- Picker key is cleared because it may belong to a different Cloud project.
 ---@param client_id string
 ---@param client_secret string
+---@param picker_api_key? string
 ---@return boolean success
 ---@return string|nil error_message
-function OAuthClient:saveCredentials(client_id, client_secret)
+function OAuthClient:saveCredentials(
+    client_id,
+    client_secret,
+    picker_api_key
+)
     client_id = nonEmptyString(client_id)
     client_secret = nonEmptyString(client_secret)
+    picker_api_key = nonEmptyString(picker_api_key)
 
     if not client_id then
         return false, "OAuth credentials do not contain a client ID"
@@ -84,22 +138,52 @@ function OAuthClient:saveCredentials(client_id, client_secret)
         return false, "OAuth credentials do not contain a client secret"
     end
 
+    local previous_client_id = self.CLIENT_ID
     local settings = LuaSettings:open(self.SETTINGS_FILE)
 
     settings:saveSetting("client_id", client_id)
     settings:saveSetting("client_secret", client_secret)
+
+    if picker_api_key then
+        settings:saveSetting("picker_api_key", picker_api_key)
+    elseif previous_client_id ~= nil
+        and previous_client_id ~= client_id
+    then
+        settings:delSetting("picker_api_key")
+    end
+
     settings:flush()
 
-    self.CLIENT_ID = client_id
-    self.CLIENT_SECRET = client_secret
+    self:reload()
+
+    return true, nil
+end
+
+--- Save or replace only the Google Picker API key.
+---@param picker_api_key string
+---@return boolean success
+---@return string|nil error_message
+function OAuthClient:savePickerApiKey(picker_api_key)
+    picker_api_key = nonEmptyString(picker_api_key)
+
+    if not picker_api_key then
+        return false, "Google Picker API key is required"
+    end
+
+    if not self:isConfigured() then
+        return false, "Configure Google OAuth credentials first"
+    end
+
+    local settings = LuaSettings:open(self.SETTINGS_FILE)
+    settings:saveSetting("picker_api_key", picker_api_key)
+    settings:flush()
+
+    self:reload()
 
     return true, nil
 end
 
 --- Extract client ID and secret from a Google OAuth credentials JSON object.
----
---- Google normally stores installed/device credentials under "installed".
---- "web" is accepted for compatibility with older/manual configurations.
 ---@param data table
 ---@return string|nil client_id
 ---@return string|nil client_secret
@@ -178,12 +262,14 @@ function OAuthClient:importFromJsonFile(json_path)
     }, nil
 end
 
---- Remove locally saved OAuth application credentials.
+--- Remove locally saved Google application configuration.
 ---@return boolean success
 ---@return string|nil error_message
 function OAuthClient:clearCredentials()
     self.CLIENT_ID = nil
     self.CLIENT_SECRET = nil
+    self.PICKER_API_KEY = nil
+    self.APP_ID = nil
 
     local file = io.open(self.SETTINGS_FILE, "rb")
 

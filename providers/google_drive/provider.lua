@@ -106,6 +106,18 @@ function GoogleDriveProvider:isClientConfigured()
     return self.auth:isClientConfigured()
 end
 
+--- Return whether Google Picker is configured for Drive imports.
+---@return boolean
+function GoogleDriveProvider:isPickerConfigured()
+    return self.auth:isPickerConfigured()
+end
+
+--- Return Google Picker application configuration.
+---@return table|nil config
+function GoogleDriveProvider:getPickerConfig()
+    return self.auth:getPickerConfig()
+end
+
 --- Return the KOReader settings file used for OAuth application credentials.
 ---@return string
 function GoogleDriveProvider:getOAuthCredentialSettingsFile()
@@ -123,12 +135,14 @@ end
 ---@return string|nil error_message
 function GoogleDriveProvider:setOAuthCredentials(
     client_id,
-    client_secret
+    client_secret,
+    picker_api_key
 )
     local credentials, changed, save_error =
         self.auth:setClientCredentials(
             client_id,
-            client_secret
+            client_secret,
+            picker_api_key
         )
 
     if not credentials then
@@ -555,6 +569,95 @@ function GoogleDriveProvider:uploadBook(local_path, remote_name)
             [SCHEMA_KEY] = SCHEMA_VERSION,
         }
     )
+end
+
+--- Return whether a selected Google Drive file is a supported book.
+---@param file table
+---@return boolean
+local function isSupportedImportedBook(file)
+    local mime_type = file.mimeType
+    local name = file.name or ""
+    local extension = getExtension(name)
+
+    return mime_type == "application/epub+zip"
+        or mime_type == "application/pdf"
+        or extension == "epub"
+        or extension == "pdf"
+end
+
+--- Copy books selected through Google Picker into KOCloud/Books.
+---
+--- This is a server-side Google Drive copy. KOReader receives only file IDs
+--- and metadata from the browser; ebook bytes never pass through the device.
+---@param files table[] Picker-selected file metadata.
+---@return KOCloudGoogleDriveFile[]|nil imported
+---@return table[]|nil failed
+---@return string|nil error_message
+function GoogleDriveProvider:importBooksFromDrive(files)
+    if type(files) ~= "table" or #files == 0 then
+        return nil, nil, "Select at least one Google Drive book"
+    end
+
+    local books_folder_id, folder_error =
+        self:getBooksFolderId()
+
+    if not books_folder_id then
+        return nil, nil, folder_error
+    end
+
+    local access_token, token_error = self:getAccessToken()
+
+    if not access_token then
+        return nil, nil, token_error
+    end
+
+    local imported = {}
+    local failed = {}
+
+    for _, file in ipairs(files) do
+        local source_id = file.id
+        local source_name = file.name
+
+        if type(source_id) ~= "string"
+            or source_id == ""
+            or type(source_name) ~= "string"
+            or source_name == ""
+        then
+            table.insert(failed, {
+                name = source_name or "Unknown",
+                error = "Picker returned incomplete file metadata",
+            })
+        elseif not isSupportedImportedBook(file) then
+            table.insert(failed, {
+                name = source_name,
+                error = "Only EPUB and PDF files are supported",
+            })
+        else
+            local copied, copy_error = DriveApi:copyFile(
+                access_token,
+                source_id,
+                source_name,
+                books_folder_id,
+                {
+                    [ROLE_KEY] = "book",
+                    [SCHEMA_KEY] = SCHEMA_VERSION,
+                    kocloud_source = "google_drive",
+                    kocloud_source_id = source_id,
+                }
+            )
+
+            if copied then
+                table.insert(imported, copied)
+            else
+                table.insert(failed, {
+                    name = source_name,
+                    error = copy_error or "Google Drive copy failed",
+                })
+            end
+        end
+    end
+
+    return imported, failed, nil
 end
 
 --- Download a KOCloud-managed book to a local path.

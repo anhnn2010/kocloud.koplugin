@@ -19,10 +19,16 @@ local Screen = Device.screen
 --- Compact QR + URL dialog for KOCloud phone setup.
 ---@class KOCloudOAuthSetupDialog: InputContainer
 ---@field setup_url string
+---@field title_text? string
+---@field instructions_text? string
+---@field note_text? string
 ---@field close_callback? fun()
 local OAuthSetupDialog = InputContainer:extend{
     modal = true,
     setup_url = nil,
+    title_text = nil,
+    instructions_text = nil,
+    note_text = nil,
     close_callback = nil,
 }
 
@@ -37,7 +43,8 @@ function OAuthSetupDialog:init()
     )
 
     local title = TextBoxWidget:new{
-        text = _("Configure Google OAuth from browser"),
+        text = self.title_text
+            or _("Configure Google OAuth from browser"),
         face = Font:getFace("cfont", 24),
         bold = true,
         width = content_width,
@@ -45,10 +52,11 @@ function OAuthSetupDialog:init()
     }
 
     local instructions = TextBoxWidget:new{
-        text = _(
-            "Scan the QR code with your phone, or open the address below "
-                .. "on a computer or another device on the same Wi-Fi network."
-        ),
+        text = self.instructions_text
+            or _(
+                "Scan the QR code with your phone, or open the address below "
+                    .. "on a computer or another device on the same Wi-Fi network."
+            ),
         face = Font:getFace("smallinfofont"),
         width = content_width,
         alignment = "center",
@@ -76,10 +84,11 @@ function OAuthSetupDialog:init()
     }
 
     local note = TextBoxWidget:new{
-        text = _(
-            "The setup server stays active for up to 5 minutes. "
-                .. "Closing this window does not stop the server."
-        ),
+        text = self.note_text
+            or _(
+                "The setup server stays active for up to 5 minutes. "
+                    .. "Closing this window does not stop the server."
+            ),
         face = Font:getFace("xx_smallinfofont"),
         width = content_width,
         alignment = "center",

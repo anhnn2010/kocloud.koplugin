@@ -141,6 +141,18 @@ function Auth:isClientConfigured()
     return OAuthClient:isConfigured()
 end
 
+--- Return whether Google Picker configuration is complete.
+---@return boolean
+function Auth:isPickerConfigured()
+    return OAuthClient:isPickerConfigured()
+end
+
+--- Return Google Picker application configuration.
+---@return table|nil config
+function Auth:getPickerConfig()
+    return OAuthClient:getPickerConfig()
+end
+
 --- Return the KOReader settings file that stores OAuth application credentials.
 ---@return string
 function Auth:getClientSettingsFile()
@@ -157,12 +169,20 @@ end
 ---@return table|nil credentials
 ---@return boolean changed
 ---@return string|nil error_message
-function Auth:setClientCredentials(client_id, client_secret)
+function Auth:setClientCredentials(
+    client_id,
+    client_secret,
+    picker_api_key
+)
     local old_client_id = OAuthClient.CLIENT_ID
     local old_client_secret = OAuthClient.CLIENT_SECRET
 
     local saved, save_error =
-        OAuthClient:saveCredentials(client_id, client_secret)
+        OAuthClient:saveCredentials(
+            client_id,
+            client_secret,
+            picker_api_key
+        )
 
     if not saved then
         return nil, false, save_error

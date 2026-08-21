@@ -25,7 +25,7 @@ local url = require("socket.url")
 ---@field http_socket? table
 ---@field http_messagequeue? any
 ---@field timeout_task? function
----@field on_save fun(client_id:string, client_secret:string):(boolean, string|nil)
+---@field on_save fun(client_id:string, client_secret:string, picker_api_key:string|nil):(boolean, string|nil)
 ---@field on_saved? fun()
 ---@field on_timeout? fun()
 local OAuthSetupServer = {}
@@ -438,6 +438,13 @@ or after five minutes.
 <label for="client_secret">Client Secret</label>
 <input id="client_secret" name="client_secret" type="password" autocomplete="off">
 
+<label for="picker_api_key">Google Picker API key</label>
+<input id="picker_api_key" name="picker_api_key" autocomplete="off">
+<p>
+Optional for basic Google Drive access, but required for
+"Import from Google Drive".
+</p>
+
 <details>
 <summary>Or paste the credentials JSON</summary>
 <label for="credentials_json">Credentials JSON</label>
@@ -630,6 +637,11 @@ function OAuthSetupServer:onRequest(data, request_id)
         local form = parseForm(body)
         local client_id = form.client_id
         local client_secret = form.client_secret
+        local picker_api_key = form.picker_api_key
+
+        if picker_api_key == "" then
+            picker_api_key = nil
+        end
 
         if form.credentials_json
             and form.credentials_json ~= ""
@@ -658,7 +670,11 @@ function OAuthSetupServer:onRequest(data, request_id)
         end
 
         local success, save_error =
-            self.on_save(client_id, client_secret)
+            self.on_save(
+                client_id,
+                client_secret,
+                picker_api_key
+            )
 
         if not success then
             return self:sendResponse(

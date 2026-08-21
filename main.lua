@@ -2,6 +2,7 @@ local ButtonDialog = require("ui/widget/buttondialog")
 local Config = require("core/config")
 local ConfirmBox = require("ui/widget/confirmbox")
 local Device = require("device")
+local DriveImportServer = require("core/drive_import_server")
 local filemanagerutil = require("apps/filemanager/filemanagerutil")
 local GoogleDriveProvider = require("providers/google_drive/provider")
 local InfoMessage = require("ui/widget/infomessage")
@@ -28,6 +29,8 @@ local EXPECTED_MANAGED_FOLDER_COUNT = 4
 ---@field device_auth_menu? table
 ---@field oauth_setup_server? KOCloudOAuthSetupServer
 ---@field oauth_setup_qr? QRMessage
+---@field drive_import_server? KOCloudDriveImportServer
+---@field drive_import_dialog? table
 local KOCloud = WidgetContainer:extend{
     name = "kocloud",
     is_doc_only = false,
@@ -186,6 +189,19 @@ function KOCloud:getGoogleDriveMenuItems()
         },
         {
             text_func = function()
+                local status = self.provider:isPickerConfigured()
+                        and _("Configured")
+                    or _("Not configured")
+
+                return string.format(
+                    _("Google Picker: %s"),
+                    status
+                )
+            end,
+            enabled = false,
+        },
+        {
+            text_func = function()
                 return string.format(
                     _("Storage: %s"),
                     self:getStorageStatusText()
@@ -324,6 +340,49 @@ function KOCloud:getCloudProvidersMenuItems()
     }
 end
 
+--- Return ways to add books to the KOCloud Library.
+---@return table
+function KOCloud:getAddBooksMenuItems()
+    local ready = self.provider:isConfigured()
+        and self:isStorageInitialized()
+
+    return {
+        {
+            text = _("From KOReader storage"),
+            enabled = ready,
+            keep_menu_open = true,
+            callback = function()
+                self:chooseBookForUpload()
+            end,
+        },
+        {
+            text_func = function()
+                if self.drive_import_server
+                    and self.drive_import_server:isRunning()
+                then
+                    return _("From Google Drive: Show browser link")
+                end
+
+                return _("From Google Drive")
+            end,
+            enabled = ready and self.provider:isPickerConfigured(),
+            keep_menu_open = true,
+            callback = function()
+                if self.drive_import_server
+                    and self.drive_import_server:isRunning()
+                then
+                    self:showDriveImportDialog()
+                    return
+                end
+
+                NetworkMgr:runWhenOnline(function()
+                    self:startDriveImport()
+                end)
+            end,
+        },
+    }
+end
+
 --- Return Library service menu items.
 ---@return table
 function KOCloud:getLibraryMenuItems()
@@ -342,11 +401,9 @@ function KOCloud:getLibraryMenuItems()
             end,
         },
         {
-            text = _("Upload book"),
-            enabled = ready,
-            keep_menu_open = true,
-            callback = function()
-                self:chooseBookForUpload()
+            text = _("Add books"),
+            sub_item_table_func = function()
+                return self:getAddBooksMenuItems()
             end,
         },
     }
@@ -356,6 +413,15 @@ function KOCloud:getLibraryMenuItems()
             text = _(
                 "Configure a cloud provider and initialize its storage "
                     .. "to use the library."
+            ),
+            enabled = false,
+            separator = true,
+        })
+    elseif not self.provider:isPickerConfigured() then
+        table.insert(items, {
+            text = _(
+                "Google Drive import requires Google Picker API "
+                    .. "and a Picker API key."
             ),
             enabled = false,
             separator = true,
@@ -408,6 +474,183 @@ function KOCloud:getSubMenuItems()
     }
 end
 
+--- Start a temporary browser session for importing existing Drive books.
+function KOCloud:startDriveImport()
+    self:stopDriveImport()
+
+    if not self.provider:isConfigured() then
+        UIManager:show(InfoMessage:new{
+            text = _("Connect Google Drive first."),
+            timeout = 3,
+        })
+        return
+    end
+
+    if not self.provider:isPickerConfigured() then
+        UIManager:show(InfoMessage:new{
+            text = _(
+                "Google Picker is not configured.\n\n"
+                    .. "Enable Google Picker API in your Google Cloud "
+                    .. "project and add its API key using "
+                    .. "Cloud providers → Google Drive → "
+                    .. "Configure OAuth credentials."
+            ),
+        })
+        return
+    end
+
+    local access_token, token_error =
+        self.provider:getAccessToken()
+
+    if not access_token then
+        UIManager:show(InfoMessage:new{
+            text = string.format(
+                _("Cannot start Google Drive import:\n\n%s"),
+                token_error or _("Unknown error")
+            ),
+        })
+        return
+    end
+
+    local picker = self.provider:getPickerConfig()
+
+    if not picker then
+        UIManager:show(InfoMessage:new{
+            text = _("Google Picker configuration is incomplete."),
+        })
+        return
+    end
+
+    local server
+
+    server = DriveImportServer:new{
+        access_token = access_token,
+        picker_api_key = picker.api_key,
+        app_id = picker.app_id,
+        on_import = function(files)
+            return self.provider:importBooksFromDrive(files)
+        end,
+        on_finished = function(imported_count, failed_count)
+            local message = string.format(
+                _("Imported %d book(s) from Google Drive."),
+                imported_count
+            )
+
+            if failed_count > 0 then
+                message = message
+                    .. "\n"
+                    .. string.format(
+                        _("%d book(s) failed to import."),
+                        failed_count
+                    )
+            end
+
+            UIManager:show(InfoMessage:new{
+                text = message,
+                timeout = 5,
+            })
+        end,
+        on_timeout = function()
+            if self.drive_import_server == server then
+                self.drive_import_server = nil
+            end
+
+            if self.drive_import_dialog then
+                local dialog = self.drive_import_dialog
+                self.drive_import_dialog = nil
+                UIManager:close(dialog)
+            end
+
+            UIManager:show(InfoMessage:new{
+                text = _("Google Drive import session expired."),
+                timeout = 3,
+            })
+        end,
+    }
+
+    local success, start_error = server:start()
+
+    if not success then
+        UIManager:show(InfoMessage:new{
+            text = string.format(
+                _("Cannot start Google Drive import:\n\n%s"),
+                start_error or _("Unknown error")
+            ),
+        })
+        return
+    end
+
+    self.drive_import_server = server
+    self:showDriveImportDialog()
+end
+
+--- Show QR + browser URL for the active Google Drive import session.
+function KOCloud:showDriveImportDialog()
+    local server = self.drive_import_server
+
+    if not server or not server:isRunning() then
+        UIManager:show(InfoMessage:new{
+            text = _("Google Drive import session is not running."),
+            timeout = 3,
+        })
+        return
+    end
+
+    local import_url = server:getURL()
+
+    if not import_url then
+        UIManager:show(InfoMessage:new{
+            text = _(
+                "Cannot determine this KOReader device's Wi-Fi IP address."
+            ),
+        })
+        return
+    end
+
+    if self.drive_import_dialog then
+        UIManager:close(self.drive_import_dialog)
+    end
+
+    local dialog
+
+    dialog = OAuthSetupDialog:new{
+        setup_url = import_url,
+        title_text = _("Import books from Google Drive"),
+        instructions_text = _(
+            "Scan the QR code with your phone, or open the address below "
+                .. "on a computer or another device on the same Wi-Fi network. "
+                .. "Then choose EPUB or PDF files in Google Picker."
+        ),
+        note_text = _(
+            "Google copies selected books directly into KOCloud/Books. "
+                .. "The import session stays active for up to 5 minutes. "
+                .. "Closing this window does not stop the session."
+        ),
+        close_callback = function()
+            if self.drive_import_dialog == dialog then
+                self.drive_import_dialog = nil
+            end
+        end,
+    }
+
+    self.drive_import_dialog = dialog
+    UIManager:show(dialog)
+end
+
+--- Stop the active Google Drive browser import session.
+function KOCloud:stopDriveImport()
+    if self.drive_import_dialog then
+        local dialog = self.drive_import_dialog
+        self.drive_import_dialog = nil
+        UIManager:close(dialog)
+    end
+
+    if self.drive_import_server then
+        self.drive_import_server:stop()
+        self.drive_import_server = nil
+    end
+end
+
 --- Start a temporary LAN web page for entering OAuth credentials by phone.
 ---@param touchmenu_instance? table
 function KOCloud:startPhoneOAuthSetup(touchmenu_instance)
@@ -416,11 +659,16 @@ function KOCloud:startPhoneOAuthSetup(touchmenu_instance)
     local server
 
     server = OAuthSetupServer:new{
-        on_save = function(client_id, client_secret)
+        on_save = function(
+            client_id,
+            client_secret,
+            picker_api_key
+        )
             local credentials, changed, save_error =
                 self.provider:setOAuthCredentials(
                     client_id,
-                    client_secret
+                    client_secret,
+                    picker_api_key
                 )
 
             if not credentials then
@@ -747,10 +995,13 @@ function KOCloud:showGoogleDriveSetupHelp()
             "Google Drive setup\n\n"
                 .. "1. Create a Google Cloud project.\n"
                 .. "2. Enable Google Drive API.\n"
-                .. "3. Create an OAuth client of type "
+                .. "3. Enable Google Picker API if you want to import "
+                .. "existing books from Google Drive.\n"
+                .. "4. Create an OAuth client of type "
                 .. "\"TVs and Limited Input devices\".\n"
-                .. "4. Download the OAuth client JSON file.\n"
-                .. "5. Open Configure OAuth credentials.\n\n"
+                .. "5. Download the OAuth client JSON file.\n"
+                .. "6. Create an API key for Google Picker API.\n"
+                .. "7. Open Configure OAuth credentials.\n\n"
                 .. "Recommended: From browser (phone or computer)\n"
                 .. "Scan the QR code with your phone, or open the setup address "
                 .. "on a computer or another device on the same Wi-Fi network. "
@@ -759,7 +1010,7 @@ function KOCloud:showGoogleDriveSetupHelp()
                 .. "First copy the downloaded JSON file into the "
                 .. "KOReader device storage, then select it using "
                 .. "KOReader's file picker.\n\n"
-                .. "6. Connect Google Drive and authorize on your phone.\n\n"
+                .. "8. Connect Google Drive and authorize on your phone.\n\n"
                 .. "For long-term use, publish the OAuth app to "
                 .. "In production. OAuth apps left in Testing can issue "
                 .. "refresh tokens that expire after 7 days."
@@ -1350,16 +1601,19 @@ end
 --- Stop temporary local setup services before KOReader exits.
 function KOCloud:onExit()
     self:stopPhoneOAuthSetup()
+    self:stopDriveImport()
 end
 
 --- Stop temporary local setup services when this plugin instance closes.
 function KOCloud:onCloseWidget()
     self:stopPhoneOAuthSetup()
+    self:stopDriveImport()
 end
 
 --- Do not leave a temporary credential server listening during suspend.
 function KOCloud:onSuspend()
     self:stopPhoneOAuthSetup()
+    self:stopDriveImport()
 end
 
 --- Add KOCloud to the KOReader main menu.

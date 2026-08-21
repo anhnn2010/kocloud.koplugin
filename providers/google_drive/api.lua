@@ -298,6 +298,63 @@ function DriveApi:createFolder(
     return response, nil
 end
 
+--- Copy an existing Google Drive file into a KOCloud-managed folder.
+---
+--- The copy happens server-side inside Google Drive; file content does not
+--- travel through KOReader.
+---@param access_token string
+---@param source_file_id string
+---@param name string
+---@param parent_id string
+---@param app_properties? table<string, string>
+---@return KOCloudGoogleDriveFile|nil file
+---@return string|nil error_message
+function DriveApi:copyFile(
+    access_token,
+    source_file_id,
+    name,
+    parent_id,
+    app_properties
+)
+    if type(source_file_id) ~= "string"
+        or source_file_id == ""
+    then
+        return nil, "Source Google Drive file ID is required"
+    end
+
+    local metadata = {
+        name = name,
+        parents = { parent_id },
+    }
+
+    if app_properties then
+        metadata.appProperties = app_properties
+    end
+
+    local fields =
+        "id,name,mimeType,parents,appProperties,size,modifiedTime"
+
+    local request_url =
+        DRIVE_FILES_ENDPOINT
+        .. "/"
+        .. encodeQueryValue(source_file_id)
+        .. "/copy?fields="
+        .. encodeQueryValue(fields)
+
+    local _, response, err = requestJson(
+        "POST",
+        request_url,
+        access_token,
+        metadata
+    )
+
+    if not response then
+        return nil, err
+    end
+
+    return response, nil
+end
+
 --- Start a resumable Google Drive file upload.
 ---@param access_token string
 ---@param name string Remote file name.
