@@ -112,6 +112,37 @@ function GoogleDriveProvider:getOAuthCredentialSettingsFile()
     return self.auth:getClientSettingsFile()
 end
 
+--- Save Google OAuth application credentials from the phone setup flow.
+---
+--- If the OAuth client changes, cached Google Drive folder IDs are also
+--- cleared because the next authorization may point to a different account.
+---@param client_id string
+---@param client_secret string
+---@return table|nil credentials
+---@return boolean changed
+---@return string|nil error_message
+function GoogleDriveProvider:setOAuthCredentials(
+    client_id,
+    client_secret
+)
+    local credentials, changed, save_error =
+        self.auth:setClientCredentials(
+            client_id,
+            client_secret
+        )
+
+    if not credentials then
+        return nil, false, save_error
+    end
+
+    if changed then
+        self.config.root_folder_id = nil
+        self.config.folders = nil
+    end
+
+    return credentials, changed, nil
+end
+
 --- Import Google OAuth application credentials from a downloaded JSON file.
 ---
 --- If the OAuth client changes, cached Google Drive folder IDs are also

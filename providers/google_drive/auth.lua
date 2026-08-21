@@ -147,6 +147,41 @@ function Auth:getClientSettingsFile()
     return OAuthClient:getSettingsFile()
 end
 
+--- Save Google OAuth application credentials entered through another setup UI.
+---
+--- When credentials change, the existing refresh token can no longer be
+--- assumed to belong to the same OAuth client, so local authorization state
+--- is cleared and the user must authorize again.
+---@param client_id string
+---@param client_secret string
+---@return table|nil credentials
+---@return boolean changed
+---@return string|nil error_message
+function Auth:setClientCredentials(client_id, client_secret)
+    local old_client_id = OAuthClient.CLIENT_ID
+    local old_client_secret = OAuthClient.CLIENT_SECRET
+
+    local saved, save_error =
+        OAuthClient:saveCredentials(client_id, client_secret)
+
+    if not saved then
+        return nil, false, save_error
+    end
+
+    local changed = old_client_id ~= client_id
+        or old_client_secret ~= client_secret
+
+    if changed and self:isAuthorized() then
+        self:clearAuthorization()
+    end
+
+    return {
+        client_id = client_id,
+        client_secret = client_secret,
+        changed = changed,
+    }, changed, nil
+end
+
 --- Import a Google OAuth credentials JSON file.
 ---
 --- When credentials change, the existing refresh token can no longer be

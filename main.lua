@@ -8,6 +8,7 @@ local InfoMessage = require("ui/widget/infomessage")
 local lfs = require("libs/libkoreader-lfs")
 local Menu = require("ui/widget/menu")
 local NetworkMgr = require("ui/network/manager")
+local OAuthSetupServer = require("core/oauth_setup_server")
 local QRMessage = require("ui/widget/qrmessage")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
@@ -24,6 +25,8 @@ local EXPECTED_MANAGED_FOLDER_COUNT = 4
 ---@field device_auth_dialog? ButtonDialog
 ---@field device_auth_poll_task? function
 ---@field device_auth_menu? table
+---@field oauth_setup_server? KOCloudOAuthSetupServer
+---@field oauth_setup_qr? QRMessage
 local KOCloud = WidgetContainer:extend{
     name = "kocloud",
     is_doc_only = false,
@@ -173,6 +176,36 @@ function KOCloud:getGoogleDriveSetupMenuItems()
         },
         {
             text_func = function()
+                if self.oauth_setup_server
+                    and self.oauth_setup_server:isRunning()
+                then
+                    return _("Phone setup: Show QR code")
+                end
+
+                if self.provider:isClientConfigured() then
+                    return _("Replace OAuth credentials from phone")
+                end
+
+                return _("Configure OAuth from phone")
+            end,
+            keep_menu_open = true,
+            callback = function(touchmenu_instance)
+                if self.oauth_setup_server
+                    and self.oauth_setup_server:isRunning()
+                then
+                    self:showPhoneOAuthSetupQR()
+                    return
+                end
+
+                NetworkMgr:runWhenOnline(function()
+                    self:startPhoneOAuthSetup(
+                        touchmenu_instance
+                    )
+                end)
+            end,
+        },
+        {
+            text_func = function()
                 if self.provider:isClientConfigured() then
                     return _("Replace OAuth credentials (JSON)")
                 end
@@ -309,6 +342,193 @@ function KOCloud:getSubMenuItems()
     })
 
     return items
+end
+
+--- Start a temporary LAN web page for entering OAuth credentials by phone.
+---@param touchmenu_instance? table
+function KOCloud:startPhoneOAuthSetup(touchmenu_instance)
+    self:stopPhoneOAuthSetup()
+
+    local server
+
+    server = OAuthSetupServer:new{
+        on_save = function(client_id, client_secret)
+            local credentials, changed, save_error =
+                self.provider:setOAuthCredentials(
+                    client_id,
+                    client_secret
+                )
+
+            if not credentials then
+                return false, save_error
+            end
+
+            if changed then
+                self.config:setProviderConfig(
+                    self.provider:getType(),
+                    self.provider.config
+                )
+                self.config:flush()
+                self.provider:markPersistentConfigSaved()
+            end
+
+            return true, nil
+        end,
+        on_saved = function()
+            self.oauth_setup_server = nil
+
+            if self.oauth_setup_qr then
+                local qr = self.oauth_setup_qr
+                self.oauth_setup_qr = nil
+                UIManager:close(qr)
+            end
+
+            if touchmenu_instance
+                and touchmenu_instance.updateItems
+            then
+                touchmenu_instance:updateItems()
+            end
+
+            UIManager:show(InfoMessage:new{
+                text = _(
+                    "Google OAuth credentials saved.\n\n"
+                        .. "You can now choose Connect Google Drive."
+                ),
+                timeout = 5,
+            })
+        end,
+        on_timeout = function()
+            self.oauth_setup_server = nil
+
+            if self.oauth_setup_qr then
+                local qr = self.oauth_setup_qr
+                self.oauth_setup_qr = nil
+                UIManager:close(qr)
+            end
+
+            if touchmenu_instance
+                and touchmenu_instance.updateItems
+            then
+                touchmenu_instance:updateItems()
+            end
+
+            UIManager:show(InfoMessage:new{
+                text = _("Phone OAuth setup expired."),
+                timeout = 3,
+            })
+        end,
+    }
+
+    local success, start_error = server:start()
+
+    if not success then
+        UIManager:show(InfoMessage:new{
+            text = string.format(
+                _("Cannot start phone OAuth setup:\n\n%s"),
+                start_error or _("Unknown error")
+            ),
+        })
+        return
+    end
+
+    local setup_url = server:getSetupURL()
+
+    if not setup_url then
+        server:stop()
+
+        UIManager:show(InfoMessage:new{
+            text = _(
+                "Cannot determine this KOReader device's "
+                    .. "Wi-Fi IP address."
+            ),
+        })
+        return
+    end
+
+    self.oauth_setup_server = server
+
+    UIManager:show(InfoMessage:new{
+        text = _(
+            "KOCloud will temporarily accept OAuth credentials "
+                .. "from your phone over the local network.\n\n"
+                .. "Use this only on a trusted Wi-Fi network. "
+                .. "The setup server stops automatically after "
+                .. "saving or after 5 minutes."
+        ),
+        timeout = 4,
+    })
+
+    UIManager:scheduleIn(0.2, function()
+        if self.oauth_setup_server == server
+            and server:isRunning()
+        then
+            self:showPhoneOAuthSetupQR()
+        end
+    end)
+
+    if touchmenu_instance and touchmenu_instance.updateItems then
+        touchmenu_instance:updateItems()
+    end
+end
+
+--- Show the QR code for the currently running phone OAuth setup server.
+function KOCloud:showPhoneOAuthSetupQR()
+    local server = self.oauth_setup_server
+
+    if not server or not server:isRunning() then
+        UIManager:show(InfoMessage:new{
+            text = _("Phone OAuth setup is not running."),
+            timeout = 3,
+        })
+        return
+    end
+
+    local setup_url = server:getSetupURL()
+
+    if not setup_url then
+        UIManager:show(InfoMessage:new{
+            text = _(
+                "Cannot determine this KOReader device's "
+                    .. "Wi-Fi IP address."
+            ),
+        })
+        return
+    end
+
+    if self.oauth_setup_qr then
+        UIManager:close(self.oauth_setup_qr)
+    end
+
+    local qr
+
+    qr = QRMessage:new{
+        text = setup_url,
+        width = Device.screen:getWidth(),
+        height = Device.screen:getHeight(),
+        timeout = OAuthSetupServer.TIMEOUT_SECONDS,
+        dismiss_callback = function()
+            if self.oauth_setup_qr == qr then
+                self.oauth_setup_qr = nil
+            end
+        end,
+    }
+
+    self.oauth_setup_qr = qr
+    UIManager:show(qr)
+end
+
+--- Stop any temporary phone OAuth setup server and QR dialog.
+function KOCloud:stopPhoneOAuthSetup()
+    if self.oauth_setup_qr then
+        local qr = self.oauth_setup_qr
+        self.oauth_setup_qr = nil
+        UIManager:close(qr)
+    end
+
+    if self.oauth_setup_server then
+        self.oauth_setup_server:stop()
+        self.oauth_setup_server = nil
+    end
 end
 
 --- Open KOReader's file chooser for Google's downloaded OAuth JSON file.
@@ -477,8 +697,11 @@ function KOCloud:showGoogleDriveSetupHelp()
                 .. "3. Create an OAuth client of type "
                 .. "\"TVs and Limited Input devices\".\n"
                 .. "4. Download the OAuth client JSON file.\n"
-                .. "5. Import that JSON file here.\n"
-                .. "6. Connect Google Drive and authorize on your phone.\n\n"
+                .. "5. Choose Configure OAuth from phone and scan the QR.\n"
+                .. "6. Select the JSON file in your phone browser and save.\n"
+                .. "7. Connect Google Drive and authorize on your phone.\n\n"
+                .. "You can also copy the JSON to KOReader and use "
+                .. "Import OAuth credentials (JSON).\n\n"
                 .. "For long-term use, publish the OAuth app to "
                 .. "In production. OAuth apps left in Testing can issue "
                 .. "refresh tokens that expire after 7 days."
@@ -1064,6 +1287,21 @@ function KOCloud:cancelGoogleDriveAuthorization()
     if dialog then
         UIManager:close(dialog)
     end
+end
+
+--- Stop temporary local setup services before KOReader exits.
+function KOCloud:onExit()
+    self:stopPhoneOAuthSetup()
+end
+
+--- Stop temporary local setup services when this plugin instance closes.
+function KOCloud:onCloseWidget()
+    self:stopPhoneOAuthSetup()
+end
+
+--- Do not leave a temporary credential server listening during suspend.
+function KOCloud:onSuspend()
+    self:stopPhoneOAuthSetup()
 end
 
 --- Add KOCloud to the KOReader main menu.
