@@ -175,48 +175,45 @@ function KOCloud:getGoogleDriveSetupMenuItems()
             enabled = false,
         },
         {
-            text_func = function()
-                if self.oauth_setup_server
-                    and self.oauth_setup_server:isRunning()
-                then
-                    return _("Phone setup: Show QR code")
-                end
+            text = _("Configure OAuth credentials"),
+            sub_item_table_func = function()
+                return {
+                    {
+                        text_func = function()
+                            if self.oauth_setup_server
+                                and self.oauth_setup_server:isRunning()
+                            then
+                                return _("From phone: Show QR code")
+                            end
 
-                if self.provider:isClientConfigured() then
-                    return _("Replace OAuth credentials from phone")
-                end
+                            return _("From phone")
+                        end,
+                        keep_menu_open = true,
+                        callback = function(touchmenu_instance)
+                            if self.oauth_setup_server
+                                and self.oauth_setup_server:isRunning()
+                            then
+                                self:showPhoneOAuthSetupQR()
+                                return
+                            end
 
-                return _("Configure OAuth from phone")
-            end,
-            keep_menu_open = true,
-            callback = function(touchmenu_instance)
-                if self.oauth_setup_server
-                    and self.oauth_setup_server:isRunning()
-                then
-                    self:showPhoneOAuthSetupQR()
-                    return
-                end
-
-                NetworkMgr:runWhenOnline(function()
-                    self:startPhoneOAuthSetup(
-                        touchmenu_instance
-                    )
-                end)
-            end,
-        },
-        {
-            text_func = function()
-                if self.provider:isClientConfigured() then
-                    return _("Replace OAuth credentials (JSON)")
-                end
-
-                return _("Import OAuth credentials (JSON)")
-            end,
-            keep_menu_open = true,
-            callback = function(touchmenu_instance)
-                self:chooseOAuthCredentialsFile(
-                    touchmenu_instance
-                )
+                            NetworkMgr:runWhenOnline(function()
+                                self:startPhoneOAuthSetup(
+                                    touchmenu_instance
+                                )
+                            end)
+                        end,
+                    },
+                    {
+                        text = _("From KOReader storage (JSON file)"),
+                        keep_menu_open = true,
+                        callback = function(touchmenu_instance)
+                            self:chooseOAuthCredentialsFile(
+                                touchmenu_instance
+                            )
+                        end,
+                    },
+                }
             end,
         },
     }
@@ -534,7 +531,7 @@ end
 --- Open KOReader's file chooser for Google's downloaded OAuth JSON file.
 ---@param touchmenu_instance? table
 function KOCloud:chooseOAuthCredentialsFile(touchmenu_instance)
-    local title_header = _("Choose Google OAuth credentials JSON")
+    local title_header = _("Choose OAuth JSON from KOReader storage")
 
     local caller_callback = function(json_path)
         self:importOAuthCredentials(
@@ -697,11 +694,15 @@ function KOCloud:showGoogleDriveSetupHelp()
                 .. "3. Create an OAuth client of type "
                 .. "\"TVs and Limited Input devices\".\n"
                 .. "4. Download the OAuth client JSON file.\n"
-                .. "5. Choose Configure OAuth from phone and scan the QR.\n"
-                .. "6. Select the JSON file in your phone browser and save.\n"
-                .. "7. Connect Google Drive and authorize on your phone.\n\n"
-                .. "You can also copy the JSON to KOReader and use "
-                .. "Import OAuth credentials (JSON).\n\n"
+                .. "5. Open Configure OAuth credentials.\n\n"
+                .. "Recommended: From phone\n"
+                .. "Scan the QR code and choose the JSON file "
+                .. "directly on your phone.\n\n"
+                .. "Fallback: From KOReader storage (JSON file)\n"
+                .. "First copy the downloaded JSON file into the "
+                .. "KOReader device storage, then select it using "
+                .. "KOReader's file picker.\n\n"
+                .. "6. Connect Google Drive and authorize on your phone.\n\n"
                 .. "For long-term use, publish the OAuth app to "
                 .. "In production. OAuth apps left in Testing can issue "
                 .. "refresh tokens that expire after 7 days."
