@@ -179,6 +179,7 @@ function KOCloud:getGoogleDriveSetupMenuItems()
 
                 return _("Import OAuth credentials (JSON)")
             end,
+            keep_menu_open = true,
             callback = function(touchmenu_instance)
                 self:chooseOAuthCredentialsFile(
                     touchmenu_instance
@@ -192,6 +193,7 @@ function KOCloud:getGoogleDriveSetupMenuItems()
     then
         table.insert(items, {
             text = _("Connect Google Drive"),
+            keep_menu_open = true,
             callback = function(touchmenu_instance)
                 NetworkMgr:runWhenOnline(function()
                     self:startGoogleDriveAuthorization(
@@ -205,6 +207,7 @@ function KOCloud:getGoogleDriveSetupMenuItems()
     if self.provider:isConfigured() then
         table.insert(items, {
             text = _("Disconnect Google Drive"),
+            keep_menu_open = true,
             callback = function(touchmenu_instance)
                 self:confirmDisconnectGoogleDrive(
                     touchmenu_instance
@@ -216,6 +219,7 @@ function KOCloud:getGoogleDriveSetupMenuItems()
     if self.provider:isClientConfigured() then
         table.insert(items, {
             text = _("Remove OAuth credentials"),
+            keep_menu_open = true,
             callback = function(touchmenu_instance)
                 self:confirmRemoveOAuthCredentials(
                     touchmenu_instance
@@ -226,6 +230,7 @@ function KOCloud:getGoogleDriveSetupMenuItems()
 
     table.insert(items, {
         text = _("Setup help"),
+            keep_menu_open = true,
         callback = function()
             self:showGoogleDriveSetupHelp()
         end,
@@ -264,6 +269,7 @@ function KOCloud:getSubMenuItems()
 
                 return _("Initialize storage")
             end,
+            keep_menu_open = true,
             callback = function(touchmenu_instance)
                 NetworkMgr:runWhenOnline(function()
                     self:initializeGoogleDriveStorage(
@@ -276,6 +282,7 @@ function KOCloud:getSubMenuItems()
         if self:isStorageInitialized() then
             table.insert(items, {
                 text = _("My Books"),
+            keep_menu_open = true,
                 callback = function()
                     NetworkMgr:runWhenOnline(function()
                         self:showBooks()
@@ -285,6 +292,7 @@ function KOCloud:getSubMenuItems()
 
             table.insert(items, {
                 text = _("Upload book"),
+            keep_menu_open = true,
                 callback = function()
                     self:chooseBookForUpload()
                 end,
@@ -294,6 +302,7 @@ function KOCloud:getSubMenuItems()
 
     table.insert(items, {
         text = _("Status"),
+            keep_menu_open = true,
         callback = function()
             self:showStatus()
         end,
