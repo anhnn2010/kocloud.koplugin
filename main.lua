@@ -2,6 +2,7 @@ local ButtonDialog = require("ui/widget/buttondialog")
 local Config = require("core/config")
 local ConfirmBox = require("ui/widget/confirmbox")
 local Device = require("device")
+local DriveImportDialog = require("core/drive_import_dialog")
 local DriveImportServer = require("core/drive_import_server")
 local filemanagerutil = require("apps/filemanager/filemanagerutil")
 local GoogleDriveProvider = require("providers/google_drive/provider")
@@ -613,19 +614,8 @@ function KOCloud:showDriveImportDialog()
 
     local dialog
 
-    dialog = OAuthSetupDialog:new{
-        setup_url = import_url,
-        title_text = _("Import books from Google Drive"),
-        instructions_text = _(
-            "Scan the QR code with your phone, or open the address below "
-                .. "on a computer or another device on the same Wi-Fi network. "
-                .. "Then choose EPUB or PDF files in Google Picker."
-        ),
-        note_text = _(
-            "Google copies selected books directly into KOCloud/Books. "
-                .. "The import session stays active for up to 5 minutes. "
-                .. "Closing this window does not stop the session."
-        ),
+    dialog = DriveImportDialog:new{
+        import_url = import_url,
         close_callback = function()
             if self.drive_import_dialog == dialog then
                 self.drive_import_dialog = nil
