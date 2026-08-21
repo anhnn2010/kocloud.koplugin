@@ -372,7 +372,13 @@ function KOCloud:getAddBooksMenuItems()
                 if self.drive_import_server
                     and self.drive_import_server:isRunning()
                 then
-                    self:showDriveImportDialog()
+                    UIManager:nextTick(function()
+                        if self.drive_import_server
+                            and self.drive_import_server:isRunning()
+                        then
+                            self:showDriveImportDialog()
+                        end
+                    end)
                     return
                 end
 
@@ -582,7 +588,18 @@ function KOCloud:startDriveImport()
     end
 
     self.drive_import_server = server
-    self:showDriveImportDialog()
+
+    -- As with the OAuth browser setup flow, do not stack a modal dialog
+    -- immediately from the menu/network callback. Give KOReader's UI loop
+    -- one tick to finish repainting the menu and registering the local
+    -- server before creating/painting the QR dialog.
+    UIManager:nextTick(function()
+        if self.drive_import_server == server
+            and server:isRunning()
+        then
+            self:showDriveImportDialog()
+        end
+    end)
 end
 
 --- Show QR + browser URL for the active Google Drive import session.
