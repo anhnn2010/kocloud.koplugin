@@ -461,6 +461,84 @@ function GoogleDriveProvider:getBooksFolderId()
     return storage_folders.books.id, nil
 end
 
+--- List folders and KOCloud-managed books directly under one library folder.
+---
+--- When parent_folder_id is omitted, the managed KOCloud/Books folder is
+--- used. Child folders do not need KOCloud appProperties, so Companion-created
+--- and ordinary Drive folders can both be browsed.
+---@param parent_folder_id? string Google Drive parent folder ID.
+---@return KOCloudGoogleDriveFile[]|nil folders
+---@return KOCloudGoogleDriveFile[]|nil books
+---@return string|nil error_message
+function GoogleDriveProvider:listLibraryFolder(parent_folder_id)
+    local folder_id = parent_folder_id
+
+    if type(folder_id) ~= "string" or folder_id == "" then
+        local books_folder_id, folder_error =
+            self:getBooksFolderId()
+
+        if not books_folder_id then
+            return nil, nil, folder_error
+        end
+
+        folder_id = books_folder_id
+    end
+
+    local access_token, token_error = self:getAccessToken()
+
+    if not access_token then
+        return nil, nil, token_error
+    end
+
+    local query = string.format(
+        "trashed = false and '%s' in parents",
+        folder_id
+    )
+
+    local folders = {}
+    local books = {}
+    local page_token
+
+    repeat
+        local result, list_error = DriveApi:listFiles(
+            access_token,
+            query,
+            {
+                page_size = 100,
+                page_token = page_token,
+                order_by = "name",
+            }
+        )
+
+        if not result then
+            return nil, nil, list_error
+        end
+
+        for _, file in ipairs(result.files) do
+            if file.mimeType == DriveApi.FOLDER_MIME_TYPE then
+                table.insert(folders, file)
+            else
+                local app_properties = file.appProperties or {}
+
+                if app_properties[ROLE_KEY] == "book" then
+                    table.insert(books, file)
+                end
+            end
+        end
+
+        page_token = result.nextPageToken
+    until not page_token or page_token == ""
+
+    local function sortByName(left, right)
+        return (left.name or "") < (right.name or "")
+    end
+
+    table.sort(folders, sortByName)
+    table.sort(books, sortByName)
+
+    return folders, books, nil
+end
+
 --- List all books managed by KOCloud.
 ---
 --- Results are paginated internally until every matching Drive file has been

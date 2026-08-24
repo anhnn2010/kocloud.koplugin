@@ -803,32 +803,50 @@ function KOCloud:showStatus()
     })
 end
 
---- Show all KOCloud-managed books in a paginated KOReader menu.
-function KOCloud:showBooks()
+--- Browse one KOCloud library folder in a paginated KOReader menu.
+---
+--- Opening a folder pushes another Menu on top of the current one, so
+--- KOReader's normal Back action returns naturally to the parent folder.
+---@param folder_id? string Google Drive folder ID. Nil means KOCloud/Books.
+---@param path? string[] Folder names below KOCloud/Books.
+function KOCloud:showBooks(folder_id, path)
+    local current_path = path or {}
+
     local loading_message = InfoMessage:new{
-        text = _("Loading KOCloud books…"),
+        text = _("Loading KOCloud library…"),
     }
 
     UIManager:show(loading_message)
 
     UIManager:scheduleIn(0.1, function()
-        local books, err = self.provider:listBooks()
+        local folders, books, err =
+            self.provider:listLibraryFolder(folder_id)
 
         UIManager:close(loading_message)
 
-        if not books then
+        if not folders then
             UIManager:show(InfoMessage:new{
                 text = string.format(
-                    _("Cannot load KOCloud books:\n\n%s"),
+                    _("Cannot load KOCloud library:\n\n%s"),
                     err or _("Unknown error")
                 ),
             })
             return
         end
 
-        if #books == 0 then
+        if #folders == 0 and #books == 0 then
+            local empty_text
+
+            if #current_path == 0 then
+                empty_text = _(
+                    "No books or folders have been added to KOCloud yet."
+                )
+            else
+                empty_text = _("This KOCloud folder is empty.")
+            end
+
             UIManager:show(InfoMessage:new{
-                text = _("No books have been uploaded to KOCloud yet."),
+                text = empty_text,
                 timeout = 4,
             })
             return
@@ -836,33 +854,66 @@ function KOCloud:showBooks()
 
         local item_table = {}
 
+        for _, folder in ipairs(folders) do
+            table.insert(item_table, {
+                text = (folder.name or _("Folder")) .. "/",
+                folder = folder,
+            })
+        end
+
         for _, book in ipairs(books) do
             table.insert(item_table, {
-                text = book.name,
+                text = book.name or _("Book"),
                 book = book,
             })
+        end
+
+        local title = _("My Books")
+
+        if #current_path > 0 then
+            title = title
+                .. " / "
+                .. table.concat(current_path, " / ")
         end
 
         local books_menu
 
         books_menu = Menu:new{
             title = string.format(
-                _("My Books (%d)"),
-                #books
+                "%s (%d)",
+                title,
+                #folders + #books
             ),
             item_table = item_table,
             items_max_lines = 2,
         }
 
-        --- Open actions for the selected KOCloud book.
+        --- Open a child folder or actions for the selected KOCloud book.
         ---@param item table
         function books_menu:onMenuSelect(item)
-            if item.book then
+            if item.folder then
+                local child_path = {}
+
+                for index, name in ipairs(self.kocloud_path) do
+                    child_path[index] = name
+                end
+
+                table.insert(
+                    child_path,
+                    item.folder.name or _("Folder")
+                )
+
+                self.kocloud_plugin:showBooks(
+                    item.folder.id,
+                    child_path
+                )
+            elseif item.book then
                 self.kocloud_plugin:showBookActions(item.book)
             end
         end
 
         books_menu.kocloud_plugin = self
+        books_menu.kocloud_path = current_path
 
         UIManager:show(books_menu)
     end)
