@@ -122,7 +122,7 @@ local function requestRaw(request)
 end
 
 --- Perform an authenticated Google Drive request and decode JSON.
----@param method "GET"|"POST"
+---@param method "GET"|"POST"|"PATCH"
 ---@param request_url string
 ---@param access_token string
 ---@param body? table
@@ -498,6 +498,39 @@ function DriveApi:uploadFile(
 
     file:close()
     return nil, "Google Drive upload ended without a final response"
+end
+
+--- Move a Google Drive file to Trash.
+---@param access_token string
+---@param file_id string Google Drive file ID.
+---@return boolean success
+---@return string|nil error_message
+function DriveApi:trashFile(access_token, file_id)
+    if type(file_id) ~= "string" or file_id == "" then
+        return false, "Google Drive file ID is required"
+    end
+
+    local request_url =
+        DRIVE_FILES_ENDPOINT
+        .. "/"
+        .. encodeQueryValue(file_id)
+        .. "?fields="
+        .. encodeQueryValue("id,name,trashed")
+
+    local _, response, err = requestJson(
+        "PATCH",
+        request_url,
+        access_token,
+        {
+            trashed = true,
+        }
+    )
+
+    if not response then
+        return false, err
+    end
+
+    return true, nil
 end
 
 --- Download a Google Drive blob file to a local path.

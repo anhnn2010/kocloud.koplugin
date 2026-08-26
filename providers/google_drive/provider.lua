@@ -685,6 +685,24 @@ function GoogleDriveProvider:uploadBook(
     )
 end
 
+--- Move a KOCloud-managed book to Google Drive Trash.
+---@param file_id string Google Drive book file ID.
+---@return boolean success
+---@return string|nil error_message
+function GoogleDriveProvider:deleteBook(file_id)
+    if type(file_id) ~= "string" or file_id == "" then
+        return false, "Google Drive book file ID is required"
+    end
+
+    local access_token, token_error = self:getAccessToken()
+
+    if not access_token then
+        return false, token_error
+    end
+
+    return DriveApi:trashFile(access_token, file_id)
+end
+
 --- Download a KOCloud-managed book to a local path.
 ---@param file_id string Google Drive book file ID.
 ---@param local_path string Local destination path.
