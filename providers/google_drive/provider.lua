@@ -1,3 +1,4 @@
+local BookFormats = require("core/book_formats")
 local DriveApi = require("providers/google_drive/api")
 local Auth = require("providers/google_drive/auth")
 local BaseProvider = require("providers/base")
@@ -38,11 +39,6 @@ local STORAGE_FOLDERS = {
     },
 }
 
-local BOOK_MIME_TYPES = {
-    epub = "application/epub+zip",
-    pdf = "application/pdf",
-}
-
 --- Google Drive storage provider for KOCloud.
 ---@class KOCloudGoogleDriveProvider: KOCloudBaseProvider
 ---@field name string Human-readable provider name.
@@ -62,32 +58,6 @@ GoogleDriveProvider.__index = GoogleDriveProvider
 ---@return string
 local function basename(path)
     return path:match("([^/\\]+)$") or path
-end
-
---- Return the lower-case extension of a file name.
----@param name string
----@return string|nil
-local function getExtension(name)
-    local extension = name:match("%.([^%.]+)$")
-
-    if not extension then
-        return nil
-    end
-
-    return extension:lower()
-end
-
---- Return the MIME type used when uploading a book.
----@param name string
----@return string
-local function getBookMimeType(name)
-    local extension = getExtension(name)
-
-    if extension and BOOK_MIME_TYPES[extension] then
-        return BOOK_MIME_TYPES[extension]
-    end
-
-    return "application/octet-stream"
 end
 
 --- Create a new Google Drive provider instance.
@@ -636,7 +606,7 @@ function GoogleDriveProvider:createLibraryFolder(
 end
 
 --- Upload a local book into a KOCloud Books folder.
----@param local_path string Local EPUB/PDF/other book file path.
+---@param local_path string Local supported book file path.
 ---@param remote_name? string Optional Google Drive file name.
 ---@param parent_folder_id? string Google Drive parent folder ID.
 ---@return KOCloudGoogleDriveFile|nil book
@@ -677,7 +647,7 @@ function GoogleDriveProvider:uploadBook(
         local_path,
         book_name,
         books_folder_id,
-        getBookMimeType(book_name),
+        BookFormats.getMimeType(book_name),
         {
             [ROLE_KEY] = "book",
             [SCHEMA_KEY] = SCHEMA_VERSION,

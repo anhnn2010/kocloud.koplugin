@@ -1,3 +1,4 @@
+local BookFormats = require("core/book_formats")
 local BooksBrowser = require("core/books_browser")
 local ButtonDialog = require("ui/widget/buttondialog")
 local Config = require("core/config")
@@ -32,16 +33,6 @@ local KOCloud = WidgetContainer:extend{
     name = "kocloud",
     is_doc_only = false,
 }
-
---- Return whether a local file is supported by the KOCloud upload picker.
----@param filename string
----@return boolean
-local function isSupportedBookFile(filename)
-    local lower_name = filename:lower()
-
-    return lower_name:match("%.epub$") ~= nil
-        or lower_name:match("%.pdf$") ~= nil
-end
 
 --- Return whether a local file can contain Google OAuth credentials.
 ---@param filename string
@@ -968,7 +959,7 @@ function KOCloud:downloadBook(book, local_path)
     end)
 end
 
---- Open KOReader's file chooser for a local EPUB or PDF.
+--- Open KOReader's file chooser for a supported local book file.
 function KOCloud:chooseBookForUpload(parent_folder_id, uploaded_callback)
     local title_header = _("Choose a book to upload")
 
@@ -987,7 +978,7 @@ function KOCloud:chooseBookForUpload(parent_folder_id, uploaded_callback)
         caller_callback,
         nil,
         filemanagerutil.getHomeFolder(),
-        isSupportedBookFile
+        BookFormats.isSupported
     )
 end
 
