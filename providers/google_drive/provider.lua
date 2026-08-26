@@ -595,20 +595,70 @@ function GoogleDriveProvider:listBooks()
     return books, nil
 end
 
---- Upload a local book into the KOCloud Books folder.
+
+--- Create a child folder inside the KOCloud Books library.
+---@param folder_name string
+---@param parent_folder_id? string Google Drive parent folder ID.
+---@return KOCloudGoogleDriveFile|nil folder
+---@return string|nil error_message
+function GoogleDriveProvider:createLibraryFolder(
+    folder_name,
+    parent_folder_id
+)
+    if type(folder_name) ~= "string" or folder_name == "" then
+        return nil, "Folder name is required"
+    end
+
+    local folder_id = parent_folder_id
+
+    if type(folder_id) ~= "string" or folder_id == "" then
+        local books_folder_id, folder_error =
+            self:getBooksFolderId()
+
+        if not books_folder_id then
+            return nil, folder_error
+        end
+
+        folder_id = books_folder_id
+    end
+
+    local access_token, token_error = self:getAccessToken()
+
+    if not access_token then
+        return nil, token_error
+    end
+
+    return DriveApi:createFolder(
+        access_token,
+        folder_name,
+        folder_id
+    )
+end
+
+--- Upload a local book into a KOCloud Books folder.
 ---@param local_path string Local EPUB/PDF/other book file path.
 ---@param remote_name? string Optional Google Drive file name.
+---@param parent_folder_id? string Google Drive parent folder ID.
 ---@return KOCloudGoogleDriveFile|nil book
 ---@return string|nil error_message
-function GoogleDriveProvider:uploadBook(local_path, remote_name)
+function GoogleDriveProvider:uploadBook(
+    local_path,
+    remote_name,
+    parent_folder_id
+)
     if type(local_path) ~= "string" or local_path == "" then
         return nil, "Local book path is required"
     end
 
-    local books_folder_id, folder_error = self:getBooksFolderId()
+    local books_folder_id = parent_folder_id
 
-    if not books_folder_id then
-        return nil, folder_error
+    if type(books_folder_id) ~= "string" or books_folder_id == "" then
+        local folder_error
+        books_folder_id, folder_error = self:getBooksFolderId()
+
+        if not books_folder_id then
+            return nil, folder_error
+        end
     end
 
     local access_token, token_error = self:getAccessToken()
