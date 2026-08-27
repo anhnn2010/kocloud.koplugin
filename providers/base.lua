@@ -112,6 +112,17 @@ function BaseProvider:deserializeRef(serialized_ref)
     return serialized_ref, nil
 end
 
+--- Return a stable opaque key for one remote reference.
+---
+--- This key is used only for in-memory identity such as UI selection state.
+--- Callers must not parse provider-specific values from it.
+---@param ref KOCloudRemoteRef
+---@return string|nil key
+---@return string|nil error_message
+function BaseProvider:getRefKey(ref)
+    self:_notImplemented("getRefKey")
+end
+
 --- Search remote entries using simple provider-neutral criteria.
 ---
 --- Providers should advertise this through capabilities.search. Callers must

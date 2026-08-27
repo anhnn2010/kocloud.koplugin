@@ -1,4 +1,3 @@
-local BookFormats = require("core/book_formats")
 local BooksBrowser = require("core/books_browser")
 local ButtonDialog = require("ui/widget/buttondialog")
 local Config = require("core/config")
@@ -7,23 +6,23 @@ local Device = require("device")
 local filemanagerutil = require("apps/filemanager/filemanagerutil")
 local GoogleDriveProvider = require("providers/google_drive/provider")
 local InfoMessage = require("ui/widget/infomessage")
-local lfs = require("libs/libkoreader-lfs")
 local NetworkMgr = require("ui/network/manager")
 local OAuthSetupDialog = require("core/oauth_setup_dialog")
 local OAuthSetupServer = require("core/oauth_setup_server")
 local QRMessage = require("ui/widget/qrmessage")
+local LibraryService = require("core/services/library")
 local StorageLayoutService = require("core/services/storage_layout")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
-local util = require("util")
 local _ = require("gettext")
 
 
 --- Main KOCloud plugin container.
 ---@class KOCloudPlugin: WidgetContainer
 ---@field config KOCloudConfig
----@field provider KOCloudGoogleDriveProvider
+---@field provider KOCloudBaseProvider
 ---@field layout KOCloudStorageLayoutService
+---@field library KOCloudLibraryService
 ---@field device_auth_session? KOCloudGoogleDriveDeviceSession
 ---@field device_auth_dialog? ButtonDialog
 ---@field device_auth_poll_task? function
@@ -40,33 +39,6 @@ local KOCloud = WidgetContainer:extend{
 ---@return boolean
 local function isOAuthCredentialsJsonFile(filename)
     return filename:lower():match("%.json$") ~= nil
-end
-
---- Convert a Google Drive file name into a safe local file name.
----@param name string
----@return string
-local function sanitizeLocalFilename(name)
-    local safe_name = name:gsub("[/\\]", "_")
-    safe_name = safe_name:gsub("^%s+", "")
-    safe_name = safe_name:gsub("%s+$", "")
-
-    if safe_name == "" or safe_name == "." or safe_name == ".." then
-        return "book"
-    end
-
-    return safe_name
-end
-
---- Join a directory and file name using KOReader's local path convention.
----@param directory string
----@param filename string
----@return string
-local function joinLocalPath(directory, filename)
-    if directory:sub(-1) == "/" then
-        return directory .. filename
-    end
-
-    return directory .. "/" .. filename
 end
 
 --- Initialize KOCloud, load configuration, create the active provider,
@@ -88,6 +60,7 @@ function KOCloud:init()
     end
 
     self.layout = StorageLayoutService:new(self.provider)
+    self.library = LibraryService:new(self.provider, self.layout)
 
     -- Older KOCloud versions persisted short-lived access-token state.
     -- Auth removes those legacy keys during construction; save the cleaned
@@ -797,250 +770,8 @@ end
 --- remote folder changes.
 function KOCloud:showBooks()
     UIManager:show(BooksBrowser:new{
-        kocloud_plugin = self,
+        library = self.library,
     })
-end
-
---- Show actions for a KOCloud-managed book.
----@param book KOCloudGoogleDriveFile
-function KOCloud:showBookActions(book)
-    local dialog
-
-    dialog = ButtonDialog:new{
-        title = book.name or _("Book"),
-        buttons = {
-            {
-                {
-                    text = _("Download"),
-                    callback = function()
-                        UIManager:close(dialog)
-                        self:chooseBookDownloadFolder(book)
-                    end,
-                },
-            },
-            {
-                {
-                    text = _("Details"),
-                    callback = function()
-                        self:showBookDetails(book)
-                    end,
-                },
-            },
-            {
-                {
-                    text = _("Close"),
-                    callback = function()
-                        UIManager:close(dialog)
-                    end,
-                },
-            },
-        },
-    }
-
-    UIManager:show(dialog)
-end
-
---- Show metadata for a KOCloud-managed book.
----@param book KOCloudGoogleDriveFile
-function KOCloud:showBookDetails(book)
-    local size_text = _("Unknown")
-
-    if book.size then
-        local size = tonumber(book.size)
-
-        if size then
-            size_text = util.getFriendlySize(size)
-        end
-    end
-
-    UIManager:show(InfoMessage:new{
-        text = string.format(
-            _(
-                "Name: %s\n"
-                    .. "Size: %s\n"
-                    .. "Modified: %s\n"
-                    .. "Drive file ID: %s"
-            ),
-            book.name or _("Unknown"),
-            size_text,
-            book.modifiedTime or _("Unknown"),
-            book.id or _("Unknown")
-        ),
-    })
-end
-
---- Ask the user where a KOCloud book should be downloaded.
----@param book KOCloudGoogleDriveFile
-function KOCloud:chooseBookDownloadFolder(book)
-    local title_header = _("Choose download folder")
-
-    local caller_callback = function(directory)
-        if not directory then
-            return
-        end
-
-        local filename = sanitizeLocalFilename(
-            book.name or "book"
-        )
-        local local_path = joinLocalPath(directory, filename)
-
-        self:confirmBookDownload(book, local_path)
-    end
-
-    filemanagerutil.showChooseDialog(
-        title_header,
-        caller_callback,
-        nil,
-        filemanagerutil.getHomeFolder()
-    )
-end
-
---- Confirm overwrite when needed before downloading a book.
----@param book KOCloudGoogleDriveFile
----@param local_path string
-function KOCloud:confirmBookDownload(book, local_path)
-    if lfs.attributes(local_path, "mode") ~= "file" then
-        self:downloadBook(book, local_path)
-        return
-    end
-
-    UIManager:show(ConfirmBox:new{
-        text = string.format(
-            _(
-                "A file already exists at:\n\n%s\n\n"
-                    .. "Overwrite it?"
-            ),
-            local_path
-        ),
-        ok_text = _("Overwrite"),
-        ok_callback = function()
-            self:downloadBook(book, local_path)
-        end,
-    })
-end
-
---- Download one KOCloud-managed book to local storage.
----@param book KOCloudGoogleDriveFile
----@param local_path string
-function KOCloud:downloadBook(book, local_path)
-    local downloading_message = InfoMessage:new{
-        text = string.format(
-            _("Downloading book…\n\n%s"),
-            book.name or _("Book")
-        ),
-    }
-
-    UIManager:show(downloading_message)
-
-    UIManager:scheduleIn(0.1, function()
-        local success, err = self.provider:downloadBook(
-            book.id,
-            local_path
-        )
-
-        UIManager:close(downloading_message)
-
-        if not success then
-            UIManager:show(InfoMessage:new{
-                text = string.format(
-                    _("Cannot download book:\n\n%s"),
-                    err or _("Unknown error")
-                ),
-            })
-            return
-        end
-
-        UIManager:show(InfoMessage:new{
-            text = string.format(
-                _(
-                    "Book downloaded successfully.\n\n"
-                        .. "%s"
-                ),
-                local_path
-            ),
-            timeout = 5,
-        })
-    end)
-end
-
---- Open KOReader's file chooser for a supported local book file.
-function KOCloud:chooseBookForUpload(parent_folder_id, uploaded_callback)
-    local title_header = _("Choose a book to upload")
-
-    local caller_callback = function(local_path)
-        NetworkMgr:runWhenOnline(function()
-            self:uploadBook(
-                local_path,
-                parent_folder_id,
-                uploaded_callback
-            )
-        end)
-    end
-
-    filemanagerutil.showChooseDialog(
-        title_header,
-        caller_callback,
-        nil,
-        filemanagerutil.getHomeFolder(),
-        BookFormats.isSupported
-    )
-end
-
---- Upload one local book into a KOCloud Books folder.
----@param local_path string
----@param parent_folder_id? string
----@param uploaded_callback? fun(book: KOCloudGoogleDriveFile)
-function KOCloud:uploadBook(
-    local_path,
-    parent_folder_id,
-    uploaded_callback
-)
-    local uploading_message = InfoMessage:new{
-        text = string.format(
-            _("Uploading book…\n\n%s"),
-            local_path
-        ),
-    }
-
-    UIManager:show(uploading_message)
-
-    UIManager:scheduleIn(0.1, function()
-        local book, err = self.provider:uploadBook(
-            local_path,
-            nil,
-            parent_folder_id
-        )
-
-        UIManager:close(uploading_message)
-
-        if not book then
-            UIManager:show(InfoMessage:new{
-                text = string.format(
-                    _("Cannot upload book:\n\n%s"),
-                    err or _("Unknown error")
-                ),
-            })
-            return
-        end
-
-        self.config:setProviderConfig(
-            self.provider:getType(),
-            self.provider.config
-        )
-        self.config:flush()
-
-        UIManager:show(InfoMessage:new{
-            text = string.format(
-                _("Book uploaded successfully.\n\n%s"),
-                book.name
-            ),
-            timeout = 4,
-        })
-
-        if uploaded_callback then
-            uploaded_callback(book)
-        end
-    end)
 end
 
 --- Find or create the complete KOCloud storage layout.
