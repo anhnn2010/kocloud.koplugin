@@ -218,63 +218,67 @@ function KOCloud:getGoogleDriveMenuItems()
         },
     }
 
-    if self.provider:isClientConfigured()
-        and not self.provider:isConfigured()
-    then
-        table.insert(items, {
-            text = _("Connect Google Drive"),
-            keep_menu_open = true,
-            callback = function(touchmenu_instance)
-                NetworkMgr:runWhenOnline(function()
-                    self:startGoogleDriveAuthorization(
-                        touchmenu_instance
-                    )
-                end)
-            end,
-        })
-    end
+    table.insert(items, {
+        text_func = function()
+            if self.provider:isConfigured() then
+                return _("Disconnect Google Drive")
+            end
 
-    if self.provider:isConfigured() then
-        table.insert(items, {
-            text_func = function()
-                if self:isStorageInitialized() then
-                    return _("Verify provider storage")
-                end
-
-                return _("Initialize provider storage")
-            end,
-            keep_menu_open = true,
-            callback = function(touchmenu_instance)
-                NetworkMgr:runWhenOnline(function()
-                    self:initializeProviderStorage(
-                        touchmenu_instance
-                    )
-                end)
-            end,
-        })
-
-        table.insert(items, {
-            text = _("Disconnect Google Drive"),
-            keep_menu_open = true,
-            callback = function(touchmenu_instance)
+            return _("Connect Google Drive")
+        end,
+        enabled_func = function()
+            return self.provider:isClientConfigured()
+        end,
+        keep_menu_open = true,
+        callback = function(touchmenu_instance)
+            if self.provider:isConfigured() then
                 self:confirmDisconnectGoogleDrive(
                     touchmenu_instance
                 )
-            end,
-        })
-    end
+                return
+            end
 
-    if self.provider:isClientConfigured() then
-        table.insert(items, {
-            text = _("Remove OAuth credentials"),
-            keep_menu_open = true,
-            callback = function(touchmenu_instance)
-                self:confirmRemoveOAuthCredentials(
+            NetworkMgr:runWhenOnline(function()
+                self:startGoogleDriveAuthorization(
                     touchmenu_instance
                 )
-            end,
-        })
-    end
+            end)
+        end,
+    })
+
+    table.insert(items, {
+        text_func = function()
+            if self:isStorageInitialized() then
+                return _("Verify provider storage")
+            end
+
+            return _("Initialize provider storage")
+        end,
+        enabled_func = function()
+            return self.provider:isConfigured()
+        end,
+        keep_menu_open = true,
+        callback = function(touchmenu_instance)
+            NetworkMgr:runWhenOnline(function()
+                self:initializeProviderStorage(
+                    touchmenu_instance
+                )
+            end)
+        end,
+    })
+
+    table.insert(items, {
+        text = _("Remove OAuth credentials"),
+        enabled_func = function()
+            return self.provider:isClientConfigured()
+        end,
+        keep_menu_open = true,
+        callback = function(touchmenu_instance)
+            self:confirmRemoveOAuthCredentials(
+                touchmenu_instance
+            )
+        end,
+    })
 
     table.insert(items, {
         text = _("Setup help"),
