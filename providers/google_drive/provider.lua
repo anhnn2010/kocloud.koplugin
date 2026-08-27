@@ -1,43 +1,12 @@
 local BookFormats = require("core/book_formats")
+local Protocol = require("core/protocol")
 local DriveApi = require("providers/google_drive/api")
 local Auth = require("providers/google_drive/auth")
 local BaseProvider = require("providers/base")
 
-local ROOT_FOLDER_NAME = "KOCloud"
-local ROLE_KEY = "kocloud_role"
-local SCHEMA_KEY = "kocloud_schema"
-local SCHEMA_VERSION = "1"
-
----@class KOCloudManagedFolderDefinition
----@field key string Stable local config key.
----@field name string Default visible Google Drive folder name.
----@field role string Stable appProperties role identifier.
----@field internal? boolean Whether the folder stores KOCloud-internal data.
-
----@type KOCloudManagedFolderDefinition[]
-local STORAGE_FOLDERS = {
-    {
-        key = "books",
-        name = "Books",
-        role = "books",
-    },
-    {
-        key = "backups",
-        name = "Backups",
-        role = "backups",
-    },
-    {
-        key = "reading_data",
-        name = "ReadingData",
-        role = "reading_data",
-    },
-    {
-        key = "metadata",
-        name = ".kocloud",
-        role = "metadata",
-        internal = true,
-    },
-}
+local ROLE_KEY = Protocol.METADATA_KEYS.role
+local SCHEMA_KEY = Protocol.METADATA_KEYS.schema
+local SCHEMA_VERSION = Protocol.SCHEMA_VERSION
 
 --- Google Drive storage provider for KOCloud.
 ---@class KOCloudGoogleDriveProvider: KOCloudBaseProvider
@@ -155,12 +124,156 @@ end
 ---@return KOCloudProviderCapabilities
 function GoogleDriveProvider:getCapabilities()
     return {
+        search = true,
         trash = true,
         custom_metadata = true,
         resumable_upload = true,
         server_side_copy = false,
         stable_refs = true,
     }
+end
+
+--- Serialize a Google Drive reference for persistent configuration.
+---@param ref KOCloudRemoteRef
+---@return table|nil serialized_ref
+---@return string|nil error_message
+function GoogleDriveProvider:serializeRef(ref)
+    local file_id, ref_error = getRefId(ref)
+
+    if not file_id then
+        return nil, ref_error or "Invalid Google Drive remote reference"
+    end
+
+    return { id = file_id }, nil
+end
+
+--- Restore a Google Drive reference from persistent configuration.
+---
+--- String values are accepted for migration from pre-A2 raw-ID caches.
+---@param serialized_ref any
+---@return KOCloudRemoteRef|nil ref
+---@return string|nil error_message
+function GoogleDriveProvider:deserializeRef(serialized_ref)
+    if type(serialized_ref) == "string" and serialized_ref ~= "" then
+        return { id = serialized_ref }, nil
+    end
+
+    if type(serialized_ref) == "table" then
+        local file_id, ref_error = getRefId(serialized_ref)
+
+        if file_id then
+            return { id = file_id }, nil
+        end
+
+        return nil, ref_error
+    end
+
+    return nil, "Invalid serialized Google Drive reference"
+end
+
+--- Escape one literal used in a Google Drive query expression.
+---@param value string
+---@return string
+local function escapeDriveQueryValue(value)
+    return value:gsub("\\", "\\\\"):gsub("'", "\\'")
+end
+
+--- Search Google Drive using simple provider-neutral criteria.
+---@param criteria? table
+---@return KOCloudRemoteEntry[]|nil entries
+---@return string|nil error_message
+function GoogleDriveProvider:findEntries(criteria)
+    criteria = criteria or {}
+
+    local access_token, token_error = self:getAccessToken()
+
+    if not access_token then
+        return nil, token_error
+    end
+
+    local clauses = { "trashed = false" }
+
+    if criteria.kind == "folder" then
+        table.insert(clauses, string.format(
+            "mimeType = '%s'",
+            DriveApi.FOLDER_MIME_TYPE
+        ))
+    elseif criteria.kind == "file" then
+        table.insert(clauses, string.format(
+            "mimeType != '%s'",
+            DriveApi.FOLDER_MIME_TYPE
+        ))
+    end
+
+    if type(criteria.name) == "string" and criteria.name ~= "" then
+        table.insert(clauses, string.format(
+            "name = '%s'",
+            escapeDriveQueryValue(criteria.name)
+        ))
+    end
+
+    if criteria.parent_ref ~= nil then
+        local parent_id, ref_error = getRefId(criteria.parent_ref)
+
+        if not parent_id then
+            return nil, ref_error or "Invalid Google Drive parent reference"
+        end
+
+        table.insert(clauses, string.format(
+            "'%s' in parents",
+            escapeDriveQueryValue(parent_id)
+        ))
+    end
+
+    if type(criteria.metadata) == "table" then
+        for key, value in pairs(criteria.metadata) do
+            if type(key) == "string" and type(value) == "string" then
+                table.insert(clauses, string.format(
+                    "appProperties has { key='%s' and value='%s' }",
+                    escapeDriveQueryValue(key),
+                    escapeDriveQueryValue(value)
+                ))
+            end
+        end
+    end
+
+    local max_results = tonumber(criteria.limit)
+    local entries = {}
+    local page_token
+
+    repeat
+        local page_size = 100
+
+        if max_results then
+            page_size = math.max(1, math.min(100, max_results - #entries))
+        end
+
+        local result, list_error = DriveApi:listFiles(
+            access_token,
+            table.concat(clauses, " and "),
+            {
+                page_size = page_size,
+                page_token = page_token,
+                order_by = criteria.order_by or "name",
+            }
+        )
+
+        if not result then
+            return nil, list_error
+        end
+
+        for _index, file in ipairs(result.files) do
+            table.insert(entries, toRemoteEntry(file))
+
+            if max_results and #entries >= max_results then
+                return entries, nil
+            end
+        end
+
+        page_token = result.nextPageToken
+    until not page_token or page_token == ""
+
+    return entries, nil
 end
 
 --- List direct children of a Google Drive folder.
@@ -404,8 +517,8 @@ end
 
 --- Save Google OAuth application credentials from the phone setup flow.
 ---
---- If the OAuth client changes, cached Google Drive folder IDs are also
---- cleared because the next authorization may point to a different account.
+--- StorageLayoutService clears account-specific layout refs when the OAuth
+--- client changes.
 ---@param client_id string
 ---@param client_secret string
 ---@return table|nil credentials
@@ -425,18 +538,13 @@ function GoogleDriveProvider:setOAuthCredentials(
         return nil, false, save_error
     end
 
-    if changed then
-        self.config.root_folder_id = nil
-        self.config.folders = nil
-    end
-
     return credentials, changed, nil
 end
 
 --- Import Google OAuth application credentials from a downloaded JSON file.
 ---
---- If the OAuth client changes, cached Google Drive folder IDs are also
---- cleared because the next authorization may point to a different account.
+--- StorageLayoutService clears account-specific layout refs when the OAuth
+--- client changes.
 ---@param json_path string
 ---@return table|nil credentials
 ---@return boolean changed
@@ -449,19 +557,12 @@ function GoogleDriveProvider:importOAuthCredentials(json_path)
         return nil, false, import_error
     end
 
-    if changed then
-        self.config.root_folder_id = nil
-        self.config.folders = nil
-    end
-
     return credentials, changed, nil
 end
 
---- Disconnect Google Drive and clear account-specific cached folder IDs.
+--- Disconnect Google Drive authorization on this device.
 function GoogleDriveProvider:disconnect()
     self.auth:clearAuthorization()
-    self.config.root_folder_id = nil
-    self.config.folders = nil
 end
 
 --- Remove OAuth application credentials and all account-specific local state.
@@ -474,9 +575,6 @@ function GoogleDriveProvider:clearOAuthCredentials()
     if not success then
         return false, clear_error
     end
-
-    self.config.root_folder_id = nil
-    self.config.folders = nil
 
     return true, nil
 end
@@ -519,236 +617,36 @@ function GoogleDriveProvider:getAccessToken()
     return self.auth:getAccessToken()
 end
 
---- Find the KOCloud-managed root folder in Google Drive.
----@return KOCloudGoogleDriveFile|nil folder
----@return string|nil error_message
-function GoogleDriveProvider:findRootFolder()
-    local access_token, token_error = self:getAccessToken()
-
-    if not access_token then
-        return nil, token_error
-    end
-
-    local query = string.format(
-        "trashed = false and mimeType = '%s' "
-            .. "and appProperties has { key='%s' and value='root' }",
-        DriveApi.FOLDER_MIME_TYPE,
-        ROLE_KEY
-    )
-
-    local result, list_error = DriveApi:listFiles(
-        access_token,
-        query,
-        {
-            page_size = 10,
-        }
-    )
-
-    if not result then
-        return nil, list_error
-    end
-
-    if #result.files == 0 then
-        return nil, nil
-    end
-
-    return result.files[1], nil
-end
-
---- Find or create the KOCloud-managed root folder.
----@return KOCloudGoogleDriveFile|nil folder
----@return boolean created True when a new folder was created.
----@return string|nil error_message
-function GoogleDriveProvider:ensureRootFolder()
-    local folder, find_error = self:findRootFolder()
-
-    if find_error then
-        return nil, false, find_error
-    end
-
-    if folder then
-        self.config.root_folder_id = folder.id
-        return folder, false, nil
-    end
-
-    local access_token, token_error = self:getAccessToken()
-
-    if not access_token then
-        return nil, false, token_error
-    end
-
-    local created_folder, create_error = DriveApi:createFolder(
-        access_token,
-        ROOT_FOLDER_NAME,
-        nil,
-        {
-            [ROLE_KEY] = "root",
-            [SCHEMA_KEY] = SCHEMA_VERSION,
-        }
-    )
-
-    if not created_folder then
-        return nil, false, create_error
-    end
-
-    self.config.root_folder_id = created_folder.id
-
-    return created_folder, true, nil
-end
-
---- Find a KOCloud-managed child folder by role under a parent folder.
----@param parent_id string Google Drive parent folder ID.
----@param role string Stable KOCloud folder role.
----@return KOCloudGoogleDriveFile|nil folder
----@return string|nil error_message
-function GoogleDriveProvider:findManagedFolder(parent_id, role)
-    local access_token, token_error = self:getAccessToken()
-
-    if not access_token then
-        return nil, token_error
-    end
-
-    local query = string.format(
-        "trashed = false and '%s' in parents "
-            .. "and mimeType = '%s' "
-            .. "and appProperties has { key='%s' and value='%s' }",
-        parent_id,
-        DriveApi.FOLDER_MIME_TYPE,
-        ROLE_KEY,
-        role
-    )
-
-    local result, list_error = DriveApi:listFiles(
-        access_token,
-        query,
-        {
-            page_size = 10,
-        }
-    )
-
-    if not result then
-        return nil, list_error
-    end
-
-    if #result.files == 0 then
-        return nil, nil
-    end
-
-    return result.files[1], nil
-end
-
---- Find or create one managed folder under the KOCloud root.
----@param parent_id string Google Drive parent folder ID.
----@param definition KOCloudManagedFolderDefinition
----@return KOCloudGoogleDriveFile|nil folder
----@return boolean created True when a new folder was created.
----@return string|nil error_message
-function GoogleDriveProvider:ensureManagedFolder(parent_id, definition)
-    local folder, find_error = self:findManagedFolder(
-        parent_id,
-        definition.role
-    )
-
-    if find_error then
-        return nil, false, find_error
-    end
-
-    if folder then
-        return folder, false, nil
-    end
-
-    local access_token, token_error = self:getAccessToken()
-
-    if not access_token then
-        return nil, false, token_error
-    end
-
-    local app_properties = {
-        [ROLE_KEY] = definition.role,
-        [SCHEMA_KEY] = SCHEMA_VERSION,
-    }
-
-    if definition.internal then
-        app_properties.kocloud_internal = "true"
-    end
-
-    local created_folder, create_error = DriveApi:createFolder(
-        access_token,
-        definition.name,
-        parent_id,
-        app_properties
-    )
-
-    if not created_folder then
-        return nil, false, create_error
-    end
-
-    return created_folder, true, nil
-end
-
---- Ensure the complete KOCloud Google Drive storage layout exists.
----@return table<string, KOCloudGoogleDriveFile>|nil folders
----@return integer created_count Number of folders created during this call.
----@return string|nil error_message
-function GoogleDriveProvider:ensureStorageLayout()
-    local root_folder, root_created, root_error =
-        self:ensureRootFolder()
-
-    if not root_folder then
-        return nil, 0, root_error
-    end
-
-    local folders = {
-        root = root_folder,
-    }
-    local created_count = root_created and 1 or 0
-
-    self.config.folders = self.config.folders or {}
-    self.config.root_folder_id = root_folder.id
-
-    for _, definition in ipairs(STORAGE_FOLDERS) do
-        local folder, created, folder_error =
-            self:ensureManagedFolder(
-                root_folder.id,
-                definition
-            )
-
-        if not folder then
-            return nil, created_count, folder_error
-        end
-
-        folders[definition.key] = folder
-        self.config.folders[definition.key] = folder.id
-
-        if created then
-            created_count = created_count + 1
-        end
-    end
-
-    return folders, created_count, nil
-end
-
---- Return the cached Books folder ID, initializing storage when necessary.
+--- Return the cached Books folder ID for legacy Library APIs.
+---
+--- StorageLayoutService owns initialization and persistence. This method is a
+--- temporary compatibility bridge until LibraryService removes Drive-shaped
+--- Library APIs from the provider.
 ---@return string|nil folder_id
 ---@return string|nil error_message
 function GoogleDriveProvider:getBooksFolderId()
-    local folders = self.config.folders
+    local layout = self.config.layout
 
-    if type(folders) == "table"
-        and type(folders.books) == "string"
-        and folders.books ~= ""
-    then
-        return folders.books, nil
+    if type(layout) ~= "table" or type(layout.folders) ~= "table" then
+        return nil, "KOCloud storage is not initialized"
     end
 
-    local storage_folders, _, storage_error =
-        self:ensureStorageLayout()
+    local ref, deserialize_error =
+        self:deserializeRef(layout.folders.books)
 
-    if not storage_folders then
-        return nil, storage_error
+    if not ref then
+        return nil, deserialize_error
+            or "KOCloud Books folder reference is unavailable"
     end
 
-    return storage_folders.books.id, nil
+    local folder_id, ref_error = getRefId(ref)
+
+    if not folder_id then
+        return nil, ref_error
+            or "KOCloud Books folder reference is unavailable"
+    end
+
+    return folder_id, nil
 end
 
 --- List folders and KOCloud-managed books directly under one library folder.
@@ -786,7 +684,7 @@ function GoogleDriveProvider:listLibraryFolder(parent_folder_id)
     for _index, entry in ipairs(entries) do
         if entry.kind == "folder" then
             table.insert(folders, toLegacyDriveFile(entry))
-        elseif entry.metadata[ROLE_KEY] == "book" then
+        elseif entry.metadata[ROLE_KEY] == Protocol.ROLES.book then
             table.insert(books, toLegacyDriveFile(entry))
         end
     end
@@ -816,10 +714,11 @@ function GoogleDriveProvider:listBooks()
     local query = string.format(
         "trashed = false and '%s' in parents "
             .. "and mimeType != '%s' "
-            .. "and appProperties has { key='%s' and value='book' }",
+            .. "and appProperties has { key='%s' and value='%s' }",
         books_folder_id,
         DriveApi.FOLDER_MIME_TYPE,
-        ROLE_KEY
+        ROLE_KEY,
+        Protocol.ROLES.book
     )
 
     local books = {}
@@ -927,7 +826,7 @@ function GoogleDriveProvider:uploadBook(
         {
             mime_type = BookFormats.getMimeType(book_name),
             metadata = {
-                [ROLE_KEY] = "book",
+                [ROLE_KEY] = Protocol.ROLES.book,
                 [SCHEMA_KEY] = SCHEMA_VERSION,
             },
         }

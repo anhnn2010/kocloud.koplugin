@@ -30,6 +30,7 @@ BaseProvider.__index = BaseProvider
 
 --- Generic provider capabilities implemented by this adapter.
 ---@class KOCloudProviderCapabilities
+---@field search boolean Provider implements provider-side entry search.
 ---@field trash boolean Delete can move entries to a recoverable trash.
 ---@field custom_metadata boolean Provider supports private custom metadata.
 ---@field resumable_upload boolean Provider implements resumable uploads.
@@ -64,6 +65,7 @@ end
 ---@return KOCloudProviderCapabilities
 function BaseProvider:getCapabilities()
     return {
+        search = false,
         trash = false,
         custom_metadata = false,
         resumable_upload = false,
@@ -81,6 +83,44 @@ function BaseProvider:_notImplemented(method_name)
         self.type or "unknown",
         method_name
     ))
+end
+
+
+--- Serialize an opaque remote reference for persistent configuration.
+---
+--- The returned value must be representable by KOReader LuaSettings.
+---@param ref KOCloudRemoteRef
+---@return any serialized_ref
+---@return string|nil error_message
+function BaseProvider:serializeRef(ref)
+    if type(ref) ~= "table" then
+        return nil, "Invalid remote reference"
+    end
+
+    return ref, nil
+end
+
+--- Restore an opaque remote reference from persistent configuration.
+---@param serialized_ref any
+---@return KOCloudRemoteRef|nil ref
+---@return string|nil error_message
+function BaseProvider:deserializeRef(serialized_ref)
+    if type(serialized_ref) ~= "table" then
+        return nil, "Invalid serialized remote reference"
+    end
+
+    return serialized_ref, nil
+end
+
+--- Search remote entries using simple provider-neutral criteria.
+---
+--- Providers should advertise this through capabilities.search. Callers must
+--- fall back to listChildren() when search is unavailable.
+---@param criteria? table
+---@return KOCloudRemoteEntry[]|nil entries
+---@return string|nil error_message
+function BaseProvider:findEntries(criteria)
+    self:_notImplemented("findEntries")
 end
 
 --- List direct children of one remote folder.

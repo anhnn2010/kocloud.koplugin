@@ -12,17 +12,18 @@ local NetworkMgr = require("ui/network/manager")
 local OAuthSetupDialog = require("core/oauth_setup_dialog")
 local OAuthSetupServer = require("core/oauth_setup_server")
 local QRMessage = require("ui/widget/qrmessage")
+local StorageLayoutService = require("core/services/storage_layout")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local util = require("util")
 local _ = require("gettext")
 
-local EXPECTED_MANAGED_FOLDER_COUNT = 4
 
 --- Main KOCloud plugin container.
 ---@class KOCloudPlugin: WidgetContainer
 ---@field config KOCloudConfig
 ---@field provider KOCloudGoogleDriveProvider
+---@field layout KOCloudStorageLayoutService
 ---@field device_auth_session? KOCloudGoogleDriveDeviceSession
 ---@field device_auth_dialog? ButtonDialog
 ---@field device_auth_poll_task? function
@@ -86,16 +87,21 @@ function KOCloud:init()
         ))
     end
 
+    self.layout = StorageLayoutService:new(self.provider)
+
     -- Older KOCloud versions persisted short-lived access-token state.
     -- Auth removes those legacy keys during construction; save the cleaned
     -- provider config once so kocloud.lua keeps only long-lived state.
-    if self.provider:isPersistentConfigDirty() then
+    if self.provider:isPersistentConfigDirty()
+        or self.layout:isPersistentConfigDirty()
+    then
         self.config:setProviderConfig(
             provider_type,
             self.provider.config
         )
         self.config:flush()
         self.provider:markPersistentConfigSaved()
+        self.layout:markPersistentConfigSaved()
     end
 
     self.ui.menu:registerToMainMenu(self)
@@ -114,29 +120,13 @@ end
 --- Return the number of cached managed KOCloud folders.
 ---@return integer
 function KOCloud:getManagedFolderCount()
-    local folders = self.provider.config.folders
-
-    if type(folders) ~= "table" then
-        return 0
-    end
-
-    local count = 0
-
-    for _, folder_id in pairs(folders) do
-        if type(folder_id) == "string" and folder_id ~= "" then
-            count = count + 1
-        end
-    end
-
-    return count
+    return self.layout:getManagedFolderCount()
 end
 
 --- Return whether the complete KOCloud storage layout is initialized.
 ---@return boolean
 function KOCloud:isStorageInitialized()
-    return type(self.provider.config.root_folder_id) == "string"
-        and self.provider.config.root_folder_id ~= ""
-        and self:getManagedFolderCount() == EXPECTED_MANAGED_FOLDER_COUNT
+    return self.layout:isInitialized()
 end
 
 --- Return a human-readable KOCloud storage status.
@@ -256,7 +246,7 @@ function KOCloud:getGoogleDriveMenuItems()
             keep_menu_open = true,
             callback = function(touchmenu_instance)
                 NetworkMgr:runWhenOnline(function()
-                    self:initializeGoogleDriveStorage(
+                    self:initializeProviderStorage(
                         touchmenu_instance
                     )
                 end)
@@ -411,12 +401,14 @@ function KOCloud:startPhoneOAuthSetup(touchmenu_instance)
             end
 
             if changed then
+                self.layout:clearCache()
                 self.config:setProviderConfig(
                     self.provider:getType(),
                     self.provider.config
                 )
                 self.config:flush()
                 self.provider:markPersistentConfigSaved()
+                self.layout:markPersistentConfigSaved()
             end
 
             return true, nil
@@ -608,15 +600,17 @@ function KOCloud:importOAuthCredentials(
         return
     end
 
-    -- Replacing the OAuth client clears authorization and cached Drive folder
-    -- IDs. Persist that cleanup immediately.
+    -- Replacing the OAuth client may authorize a different Drive account.
+    -- Clear cached remote layout references before persisting the new state.
     if changed then
+        self.layout:clearCache()
         self.config:setProviderConfig(
             self.provider:getType(),
             self.provider.config
         )
         self.config:flush()
         self.provider:markPersistentConfigSaved()
+        self.layout:markPersistentConfigSaved()
     end
 
     local message = _(
@@ -652,6 +646,7 @@ function KOCloud:confirmDisconnectGoogleDrive(
         ok_text = _("Disconnect"),
         ok_callback = function()
             self.provider:disconnect()
+            self.layout:clearCache()
 
             self.config:setProviderConfig(
                 self.provider:getType(),
@@ -659,6 +654,7 @@ function KOCloud:confirmDisconnectGoogleDrive(
             )
             self.config:flush()
             self.provider:markPersistentConfigSaved()
+            self.layout:markPersistentConfigSaved()
 
             if touchmenu_instance
                 and touchmenu_instance.updateItems
@@ -702,12 +698,15 @@ function KOCloud:confirmRemoveOAuthCredentials(
                 return
             end
 
+            self.layout:clearCache()
+
             self.config:setProviderConfig(
                 self.provider:getType(),
                 self.provider.config
             )
             self.config:flush()
             self.provider:markPersistentConfigSaved()
+            self.layout:markPersistentConfigSaved()
 
             if touchmenu_instance
                 and touchmenu_instance.updateItems
@@ -756,7 +755,8 @@ function KOCloud:showStatus()
             and _("Configured")
         or _("Not configured")
 
-    local root_folder_id = self.provider.config.root_folder_id
+    local root_ref = self.layout:getRootRef()
+    local root_status = root_ref and _("Available")
         or _("Not available")
 
     UIManager:show(InfoMessage:new{
@@ -768,7 +768,7 @@ function KOCloud:showStatus()
                     .. "OAuth app: %s\n"
                     .. "Storage: %s\n"
                     .. "Managed folders: %d/%d\n"
-                    .. "Root folder ID: %s\n"
+                    .. "Storage root: %s\n"
                     .. "Settings: %s\n"
                     .. "OAuth credentials: %s"
             ),
@@ -778,8 +778,8 @@ function KOCloud:showStatus()
             client_status,
             self:getStorageStatusText(),
             self:getManagedFolderCount(),
-            EXPECTED_MANAGED_FOLDER_COUNT,
-            root_folder_id,
+            self.layout:getExpectedManagedFolderCount(),
+            root_status,
             self.config:getSettingsFile(),
             self.provider:getOAuthCredentialSettingsFile()
         ),
@@ -1039,9 +1039,9 @@ function KOCloud:uploadBook(
     end)
 end
 
---- Find or create the complete KOCloud Google Drive storage layout.
+--- Find or create the complete KOCloud storage layout.
 ---@param touchmenu_instance? table
-function KOCloud:initializeGoogleDriveStorage(touchmenu_instance)
+function KOCloud:initializeProviderStorage(touchmenu_instance)
     if not self.provider:isConfigured() then
         UIManager:show(InfoMessage:new{
             text = _("Connect Google Drive first."),
@@ -1051,7 +1051,7 @@ function KOCloud:initializeGoogleDriveStorage(touchmenu_instance)
     end
 
     local folders, created_count, err =
-        self.provider:ensureStorageLayout()
+        self.layout:ensureStorageLayout()
 
     if not folders then
         UIManager:show(InfoMessage:new{
@@ -1068,6 +1068,7 @@ function KOCloud:initializeGoogleDriveStorage(touchmenu_instance)
         self.provider.config
     )
     self.config:flush()
+    self.layout:markPersistentConfigSaved()
 
     local message
 
