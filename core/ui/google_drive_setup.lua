@@ -2,12 +2,14 @@ local ButtonDialog = require("ui/widget/buttondialog")
 local ConfirmBox = require("ui/widget/confirmbox")
 local Device = require("device")
 local filemanagerutil = require("apps/filemanager/filemanagerutil")
+local PathChooser = require("ui/widget/pathchooser")
 local InfoMessage = require("ui/widget/infomessage")
 local NetworkMgr = require("ui/network/manager")
 local OAuthSetupDialog = require("core/oauth_setup_dialog")
 local OAuthSetupServer = require("core/oauth_setup_server")
 local QRMessage = require("ui/widget/qrmessage")
 local UIManager = require("ui/uimanager")
+local ffiUtil = require("ffi/util")
 local _ = require("gettext")
 
 --- Google Drive account/setup UI controller.
@@ -25,6 +27,7 @@ local _ = require("gettext")
 ---@field device_auth_menu? table
 ---@field oauth_setup_server? KOCloudOAuthSetupServer
 ---@field oauth_setup_qr? table
+---@field last_oauth_import_dir? string
 local GoogleDriveSetup = {}
 GoogleDriveSetup.__index = GoogleDriveSetup
 
@@ -157,18 +160,6 @@ function GoogleDriveSetup:getMenuItems()
             end,
         },
         {
-            text = _("Remove OAuth credentials"),
-            enabled_func = function()
-                return self.provider:isClientConfigured()
-            end,
-            keep_menu_open = true,
-            callback = function(touchmenu_instance)
-                self:confirmRemoveOAuthCredentials(
-                    touchmenu_instance
-                )
-            end,
-        },
-        {
             text = _("Setup help"),
             keep_menu_open = true,
             callback = function()
@@ -211,6 +202,18 @@ function GoogleDriveSetup:getOAuthCredentialsMenuItems()
             keep_menu_open = true,
             callback = function(touchmenu_instance)
                 self:chooseOAuthCredentialsFile(
+                    touchmenu_instance
+                )
+            end,
+        },
+        {
+            text = _("Remove OAuth credentials"),
+            enabled_func = function()
+                return self.provider:isClientConfigured()
+            end,
+            keep_menu_open = true,
+            callback = function(touchmenu_instance)
+                self:confirmRemoveOAuthCredentials(
                     touchmenu_instance
                 )
             end,
@@ -372,18 +375,28 @@ end
 --- Open KOReader's file chooser for Google's downloaded OAuth JSON file.
 ---@param touchmenu_instance? table
 function GoogleDriveSetup:chooseOAuthCredentialsFile(touchmenu_instance)
-    filemanagerutil.showChooseDialog(
-        _("Choose OAuth JSON from KOReader storage"),
-        function(json_path)
+    local path_chooser
+    path_chooser = PathChooser:new{
+        select_directory = false,
+        select_file = true,
+        show_files = true,
+        file_filter = isOAuthCredentialsJsonFile,
+        path = self.last_oauth_import_dir
+            or filemanagerutil.getHomeFolder(),
+        onConfirm = function(json_path)
+            local directory = ffiUtil.dirname(json_path)
+            if directory and directory ~= "" then
+                self.last_oauth_import_dir = directory
+            end
+
             self:importOAuthCredentials(
                 json_path,
                 touchmenu_instance
             )
         end,
-        nil,
-        filemanagerutil.getHomeFolder(),
-        isOAuthCredentialsJsonFile
-    )
+    }
+
+    UIManager:show(path_chooser)
 end
 
 --- Import and persist Google OAuth application credentials.
