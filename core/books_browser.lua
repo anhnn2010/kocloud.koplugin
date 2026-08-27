@@ -669,7 +669,7 @@ function BooksBrowser:getCurrentPath()
         table.insert(parts, path_item.name or _("Folder"))
     end
 
-    return table.concat(parts, " / ")
+    return table.concat(parts, "/")
 end
 
 --- Return the book size using the same compact presentation as CloudStorage.
@@ -752,13 +752,9 @@ function BooksBrowser:loadCurrentFolder()
             return
         end
 
-        local item_count = #folders + #books
         local item_table = self:buildItemTable(folders, books)
 
-        self:switchItemTable(
-            string.format(_("My Books (%d)"), item_count),
-            item_table
-        )
+        self:switchItemTable(_("My Books"), item_table)
 
         if self.title_bar then
             self.title_bar:setSubTitle(self:getCurrentPath())
