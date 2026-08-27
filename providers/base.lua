@@ -1,10 +1,40 @@
 --- Base interface for KOCloud storage providers.
+---
+--- Providers are storage adapters only. They expose generic remote-storage
+--- primitives and must not contain KOCloud domain concepts such as books,
+--- backups, reading data, or devices.
 ---@class KOCloudBaseProvider
 ---@field name string|nil Human-readable provider name.
 ---@field type string|nil Stable provider identifier.
 ---@field config table Provider configuration.
 local BaseProvider = {}
 BaseProvider.__index = BaseProvider
+
+--- Opaque provider-specific reference to one remote entry.
+---
+--- Callers may retain and pass this value back to the same provider, but must
+--- not inspect provider-specific fields such as Google Drive IDs or WebDAV
+--- paths.
+---@class KOCloudRemoteRef
+
+--- Provider-neutral remote file or folder metadata.
+---@class KOCloudRemoteEntry
+---@field ref KOCloudRemoteRef Opaque provider-specific reference.
+---@field name string Visible remote entry name.
+---@field kind "file"|"folder"
+---@field size? integer File size in bytes when available.
+---@field modified_at? string Provider timestamp when available.
+---@field mime_type? string MIME type when available.
+---@field metadata? table<string, string> Provider-backed custom metadata.
+---@field parent_refs? KOCloudRemoteRef[] Parent references when available.
+
+--- Generic provider capabilities implemented by this adapter.
+---@class KOCloudProviderCapabilities
+---@field trash boolean Delete can move entries to a recoverable trash.
+---@field custom_metadata boolean Provider supports private custom metadata.
+---@field resumable_upload boolean Provider implements resumable uploads.
+---@field server_side_copy boolean Provider implements remote server-side copy.
+---@field stable_refs boolean Remote references survive rename/move operations.
 
 --- Create a new provider instance.
 ---@param config? table Provider configuration.
@@ -27,6 +57,21 @@ function BaseProvider:getType()
     return self.type
 end
 
+--- Return generic capabilities implemented by this provider adapter.
+---
+--- Capabilities describe the KOCloud adapter implementation, not merely what
+--- the remote service could theoretically support.
+---@return KOCloudProviderCapabilities
+function BaseProvider:getCapabilities()
+    return {
+        trash = false,
+        custom_metadata = false,
+        resumable_upload = false,
+        server_side_copy = false,
+        stable_refs = false,
+    }
+end
+
 --- Raise a standard error for an unimplemented provider method.
 ---@param method_name string
 ---@return never
@@ -38,41 +83,72 @@ function BaseProvider:_notImplemented(method_name)
     ))
 end
 
---- List files and folders at a remote path.
----@param remote_path string
----@return table
-function BaseProvider:list(remote_path)
-    self:_notImplemented("list")
+--- List direct children of one remote folder.
+---
+--- A nil parent reference means the provider's user-visible root when that
+--- concept exists.
+---@param parent_ref? KOCloudRemoteRef
+---@param options? table
+---@return KOCloudRemoteEntry[]|nil entries
+---@return string|nil error_message
+function BaseProvider:listChildren(parent_ref, options)
+    self:_notImplemented("listChildren")
 end
 
---- Download a remote file to a local path.
----@param remote_path string
----@param local_path string
----@return boolean
-function BaseProvider:download(remote_path, local_path)
-    self:_notImplemented("download")
+--- Return metadata for one remote entry.
+---@param entry_ref KOCloudRemoteRef
+---@param options? table
+---@return KOCloudRemoteEntry|nil entry
+---@return string|nil error_message
+function BaseProvider:getEntry(entry_ref, options)
+    self:_notImplemented("getEntry")
 end
 
---- Upload a local file to a remote path.
----@param local_path string
----@param remote_path string
----@return boolean
-function BaseProvider:upload(local_path, remote_path)
-    self:_notImplemented("upload")
-end
-
---- Delete a remote file or folder.
----@param remote_path string
----@return boolean
-function BaseProvider:delete(remote_path)
-    self:_notImplemented("delete")
-end
-
---- Create a remote folder.
----@param remote_path string
----@return boolean
-function BaseProvider:createFolder(remote_path)
+--- Create a child folder under a remote parent.
+---@param parent_ref KOCloudRemoteRef|nil
+---@param name string
+---@param options? table
+---@return KOCloudRemoteEntry|nil entry
+---@return string|nil error_message
+function BaseProvider:createFolder(parent_ref, name, options)
     self:_notImplemented("createFolder")
+end
+
+--- Upload one local file under a remote parent.
+---@param parent_ref KOCloudRemoteRef|nil
+---@param local_path string
+---@param remote_name string
+---@param options? table
+---@return KOCloudRemoteEntry|nil entry
+---@return string|nil error_message
+function BaseProvider:uploadFile(
+    parent_ref,
+    local_path,
+    remote_name,
+    options
+)
+    self:_notImplemented("uploadFile")
+end
+
+--- Download one remote file to a local path.
+---@param file_ref KOCloudRemoteRef
+---@param local_path string
+---@param options? table
+---@return boolean success
+---@return string|nil error_message
+function BaseProvider:downloadFile(file_ref, local_path, options)
+    self:_notImplemented("downloadFile")
+end
+
+--- Delete one remote entry using the provider's safe default semantics.
+---
+--- For providers with trash support, the default should be recoverable.
+---@param entry_ref KOCloudRemoteRef
+---@param options? table
+---@return boolean success
+---@return string|nil error_message
+function BaseProvider:deleteEntry(entry_ref, options)
+    self:_notImplemented("deleteEntry")
 end
 
 return BaseProvider

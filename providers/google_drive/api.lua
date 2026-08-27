@@ -251,6 +251,38 @@ function DriveApi:listFiles(access_token, query, options)
     return response, nil
 end
 
+--- Return metadata for one Google Drive file or folder.
+---@param access_token string
+---@param file_id string Google Drive file ID.
+---@return KOCloudGoogleDriveFile|nil file
+---@return string|nil error_message
+function DriveApi:getFile(access_token, file_id)
+    if type(file_id) ~= "string" or file_id == "" then
+        return nil, "Google Drive file ID is required"
+    end
+
+    local fields =
+        "id,name,mimeType,parents,appProperties,size,modifiedTime"
+    local request_url =
+        DRIVE_FILES_ENDPOINT
+        .. "/"
+        .. encodeQueryValue(file_id)
+        .. "?fields="
+        .. encodeQueryValue(fields)
+
+    local _, response, err = requestJson(
+        "GET",
+        request_url,
+        access_token
+    )
+
+    if not response then
+        return nil, err
+    end
+
+    return response, nil
+end
+
 --- Create a folder in Google Drive.
 ---@param access_token string
 ---@param name string Folder name.

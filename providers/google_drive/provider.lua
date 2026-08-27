@@ -60,6 +60,87 @@ local function basename(path)
     return path:match("([^/\\]+)$") or path
 end
 
+--- Return the Google Drive file ID stored in an opaque KOCloud reference.
+---@param ref KOCloudRemoteRef|nil
+---@return string|nil file_id
+---@return string|nil error_message
+local function getRefId(ref)
+    if ref == nil then
+        return nil, nil
+    end
+
+    if type(ref) ~= "table"
+        or type(ref.id) ~= "string"
+        or ref.id == ""
+    then
+        return nil, "Invalid Google Drive remote reference"
+    end
+
+    return ref.id, nil
+end
+
+--- Convert Google Drive metadata to the provider-neutral KOCloud entry model.
+---@param file KOCloudGoogleDriveFile
+---@return KOCloudRemoteEntry
+local function toRemoteEntry(file)
+    local parent_refs
+
+    if type(file.parents) == "table" then
+        parent_refs = {}
+
+        for _index, parent_id in ipairs(file.parents) do
+            table.insert(parent_refs, { id = parent_id })
+        end
+    end
+
+    return {
+        ref = {
+            id = file.id,
+        },
+        name = file.name or "",
+        kind = file.mimeType == DriveApi.FOLDER_MIME_TYPE
+                and "folder"
+            or "file",
+        size = tonumber(file.size),
+        modified_at = file.modifiedTime,
+        mime_type = file.mimeType,
+        metadata = file.appProperties or {},
+        parent_refs = parent_refs,
+    }
+end
+
+--- Convert a provider-neutral entry back to the legacy Drive-shaped object.
+---
+--- This compatibility bridge keeps the existing Library UI unchanged while
+--- it is migrated to LibraryService in the next architecture steps.
+---@param entry KOCloudRemoteEntry
+---@return KOCloudGoogleDriveFile
+local function toLegacyDriveFile(entry)
+    local parents
+
+    if type(entry.parent_refs) == "table" then
+        parents = {}
+
+        for _index, parent_ref in ipairs(entry.parent_refs) do
+            if type(parent_ref) == "table"
+                and type(parent_ref.id) == "string"
+            then
+                table.insert(parents, parent_ref.id)
+            end
+        end
+    end
+
+    return {
+        id = entry.ref.id,
+        name = entry.name,
+        mimeType = entry.mime_type,
+        parents = parents,
+        appProperties = entry.metadata,
+        size = entry.size and tostring(entry.size) or nil,
+        modifiedTime = entry.modified_at,
+    }
+end
+
 --- Create a new Google Drive provider instance.
 ---@param config? table Google Drive provider configuration.
 ---@return KOCloudGoogleDriveProvider
@@ -68,6 +149,245 @@ function GoogleDriveProvider:new(config)
     local instance = BaseProvider.new(self, config)
     instance.auth = Auth:new(instance.config)
     return instance
+end
+
+--- Return generic storage capabilities implemented by this adapter.
+---@return KOCloudProviderCapabilities
+function GoogleDriveProvider:getCapabilities()
+    return {
+        trash = true,
+        custom_metadata = true,
+        resumable_upload = true,
+        server_side_copy = false,
+        stable_refs = true,
+    }
+end
+
+--- List direct children of a Google Drive folder.
+---@param parent_ref? KOCloudRemoteRef Nil means the visible Drive root.
+---@param options? table
+---@return KOCloudRemoteEntry[]|nil entries
+---@return string|nil error_message
+function GoogleDriveProvider:listChildren(parent_ref, options)
+    options = options or {}
+
+    local parent_id, ref_error = getRefId(parent_ref)
+
+    if ref_error then
+        return nil, ref_error
+    end
+
+    local access_token, token_error = self:getAccessToken()
+
+    if not access_token then
+        return nil, token_error
+    end
+
+    local query_parent = parent_id or "root"
+    local query = string.format(
+        "trashed = false and '%s' in parents",
+        query_parent
+    )
+    local entries = {}
+    local page_token
+
+    repeat
+        local result, list_error = DriveApi:listFiles(
+            access_token,
+            query,
+            {
+                page_size = options.page_size or 100,
+                page_token = page_token,
+                order_by = options.order_by or "name",
+            }
+        )
+
+        if not result then
+            return nil, list_error
+        end
+
+        for _index, file in ipairs(result.files) do
+            table.insert(entries, toRemoteEntry(file))
+        end
+
+        page_token = result.nextPageToken
+    until not page_token or page_token == ""
+
+    return entries, nil
+end
+
+--- Return metadata for one Google Drive entry.
+---@param entry_ref KOCloudRemoteRef
+---@param options? table
+---@return KOCloudRemoteEntry|nil entry
+---@return string|nil error_message
+function GoogleDriveProvider:getEntry(entry_ref, options)
+    local file_id, ref_error = getRefId(entry_ref)
+
+    if ref_error or not file_id then
+        return nil, ref_error or "Google Drive remote reference is required"
+    end
+
+    local access_token, token_error = self:getAccessToken()
+
+    if not access_token then
+        return nil, token_error
+    end
+
+    local file, get_error = DriveApi:getFile(access_token, file_id)
+
+    if not file then
+        return nil, get_error
+    end
+
+    return toRemoteEntry(file), nil
+end
+
+--- Create one Google Drive folder under a remote parent.
+---@param parent_ref KOCloudRemoteRef|nil Nil means the visible Drive root.
+---@param name string
+---@param options? table
+---@return KOCloudRemoteEntry|nil entry
+---@return string|nil error_message
+function GoogleDriveProvider:createFolder(parent_ref, name, options)
+    if type(name) ~= "string" or name == "" then
+        return nil, "Folder name is required"
+    end
+
+    options = options or {}
+
+    local parent_id, ref_error = getRefId(parent_ref)
+
+    if ref_error then
+        return nil, ref_error
+    end
+
+    local access_token, token_error = self:getAccessToken()
+
+    if not access_token then
+        return nil, token_error
+    end
+
+    local folder, create_error = DriveApi:createFolder(
+        access_token,
+        name,
+        parent_id,
+        options.metadata
+    )
+
+    if not folder then
+        return nil, create_error
+    end
+
+    return toRemoteEntry(folder), nil
+end
+
+--- Upload one local file under a Google Drive parent folder.
+---@param parent_ref KOCloudRemoteRef|nil
+---@param local_path string
+---@param remote_name string
+---@param options? table
+---@return KOCloudRemoteEntry|nil entry
+---@return string|nil error_message
+function GoogleDriveProvider:uploadFile(
+    parent_ref,
+    local_path,
+    remote_name,
+    options
+)
+    if type(local_path) ~= "string" or local_path == "" then
+        return nil, "Local file path is required"
+    end
+
+    if type(remote_name) ~= "string" or remote_name == "" then
+        return nil, "Remote file name is required"
+    end
+
+    options = options or {}
+
+    local parent_id, ref_error = getRefId(parent_ref)
+
+    if ref_error then
+        return nil, ref_error
+    end
+
+    if not parent_id then
+        return nil, "Google Drive upload parent is required"
+    end
+
+    local access_token, token_error = self:getAccessToken()
+
+    if not access_token then
+        return nil, token_error
+    end
+
+    local file, upload_error = DriveApi:uploadFile(
+        access_token,
+        local_path,
+        remote_name,
+        parent_id,
+        options.mime_type,
+        options.metadata
+    )
+
+    if not file then
+        return nil, upload_error
+    end
+
+    return toRemoteEntry(file), nil
+end
+
+--- Download one Google Drive entry to a local path.
+---@param file_ref KOCloudRemoteRef
+---@param local_path string
+---@param options? table
+---@return boolean success
+---@return string|nil error_message
+function GoogleDriveProvider:downloadFile(file_ref, local_path, options)
+    local file_id, ref_error = getRefId(file_ref)
+
+    if ref_error or not file_id then
+        return false, ref_error or "Google Drive remote reference is required"
+    end
+
+    if type(local_path) ~= "string" or local_path == "" then
+        return false, "Local destination path is required"
+    end
+
+    local access_token, token_error = self:getAccessToken()
+
+    if not access_token then
+        return false, token_error
+    end
+
+    return DriveApi:downloadFile(access_token, file_id, local_path)
+end
+
+--- Delete one Google Drive entry using recoverable Trash semantics.
+---@param entry_ref KOCloudRemoteRef
+---@param options? table
+---@return boolean success
+---@return string|nil error_message
+function GoogleDriveProvider:deleteEntry(entry_ref, options)
+    options = options or {}
+
+    if options.permanent then
+        return false, "Permanent Google Drive deletion is not implemented"
+    end
+
+    local file_id, ref_error = getRefId(entry_ref)
+
+    if ref_error or not file_id then
+        return false, ref_error or "Google Drive remote reference is required"
+    end
+
+    local access_token, token_error = self:getAccessToken()
+
+    if not access_token then
+        return false, token_error
+    end
+
+    return DriveApi:trashFile(access_token, file_id)
 end
 
 --- Return whether the KOCloud application OAuth client is configured.
@@ -433,9 +753,7 @@ end
 
 --- List folders and KOCloud-managed books directly under one library folder.
 ---
---- When parent_folder_id is omitted, the managed KOCloud/Books folder is
---- used. Child folders do not need KOCloud appProperties, so Companion-created
---- and ordinary Drive folders can both be browsed.
+--- Compatibility API retained until LibraryService owns this domain logic.
 ---@param parent_folder_id? string Google Drive parent folder ID.
 ---@return KOCloudGoogleDriveFile[]|nil folders
 ---@return KOCloudGoogleDriveFile[]|nil books
@@ -444,8 +762,7 @@ function GoogleDriveProvider:listLibraryFolder(parent_folder_id)
     local folder_id = parent_folder_id
 
     if type(folder_id) ~= "string" or folder_id == "" then
-        local books_folder_id, folder_error =
-            self:getBooksFolderId()
+        local books_folder_id, folder_error = self:getBooksFolderId()
 
         if not books_folder_id then
             return nil, nil, folder_error
@@ -454,57 +771,25 @@ function GoogleDriveProvider:listLibraryFolder(parent_folder_id)
         folder_id = books_folder_id
     end
 
-    local access_token, token_error = self:getAccessToken()
-
-    if not access_token then
-        return nil, nil, token_error
-    end
-
-    local query = string.format(
-        "trashed = false and '%s' in parents",
-        folder_id
+    local entries, list_error = self:listChildren(
+        { id = folder_id },
+        { order_by = "name" }
     )
+
+    if not entries then
+        return nil, nil, list_error
+    end
 
     local folders = {}
     local books = {}
-    local page_token
 
-    repeat
-        local result, list_error = DriveApi:listFiles(
-            access_token,
-            query,
-            {
-                page_size = 100,
-                page_token = page_token,
-                order_by = "name",
-            }
-        )
-
-        if not result then
-            return nil, nil, list_error
+    for _index, entry in ipairs(entries) do
+        if entry.kind == "folder" then
+            table.insert(folders, toLegacyDriveFile(entry))
+        elseif entry.metadata[ROLE_KEY] == "book" then
+            table.insert(books, toLegacyDriveFile(entry))
         end
-
-        for _, file in ipairs(result.files) do
-            if file.mimeType == DriveApi.FOLDER_MIME_TYPE then
-                table.insert(folders, file)
-            else
-                local app_properties = file.appProperties or {}
-
-                if app_properties[ROLE_KEY] == "book" then
-                    table.insert(books, file)
-                end
-            end
-        end
-
-        page_token = result.nextPageToken
-    until not page_token or page_token == ""
-
-    local function sortByName(left, right)
-        return (left.name or "") < (right.name or "")
     end
-
-    table.sort(folders, sortByName)
-    table.sort(books, sortByName)
 
     return folders, books, nil
 end
@@ -567,6 +852,8 @@ end
 
 
 --- Create a child folder inside the KOCloud Books library.
+---
+--- Compatibility API retained until LibraryService owns this domain logic.
 ---@param folder_name string
 ---@param parent_folder_id? string Google Drive parent folder ID.
 ---@return KOCloudGoogleDriveFile|nil folder
@@ -575,15 +862,10 @@ function GoogleDriveProvider:createLibraryFolder(
     folder_name,
     parent_folder_id
 )
-    if type(folder_name) ~= "string" or folder_name == "" then
-        return nil, "Folder name is required"
-    end
-
     local folder_id = parent_folder_id
 
     if type(folder_id) ~= "string" or folder_id == "" then
-        local books_folder_id, folder_error =
-            self:getBooksFolderId()
+        local books_folder_id, folder_error = self:getBooksFolderId()
 
         if not books_folder_id then
             return nil, folder_error
@@ -592,20 +874,21 @@ function GoogleDriveProvider:createLibraryFolder(
         folder_id = books_folder_id
     end
 
-    local access_token, token_error = self:getAccessToken()
+    local entry, create_error = self:createFolder(
+        { id = folder_id },
+        folder_name
+    )
 
-    if not access_token then
-        return nil, token_error
+    if not entry then
+        return nil, create_error
     end
 
-    return DriveApi:createFolder(
-        access_token,
-        folder_name,
-        folder_id
-    )
+    return toLegacyDriveFile(entry), nil
 end
 
 --- Upload a local book into a KOCloud Books folder.
+---
+--- Compatibility API retained until LibraryService owns this domain logic.
 ---@param local_path string Local supported book file path.
 ---@param remote_name? string Optional Google Drive file name.
 ---@param parent_folder_id? string Google Drive parent folder ID.
@@ -631,28 +914,30 @@ function GoogleDriveProvider:uploadBook(
         end
     end
 
-    local access_token, token_error = self:getAccessToken()
-
-    if not access_token then
-        return nil, token_error
-    end
-
     local book_name = remote_name
+
     if type(book_name) ~= "string" or book_name == "" then
         book_name = basename(local_path)
     end
 
-    return DriveApi:uploadFile(
-        access_token,
+    local entry, upload_error = self:uploadFile(
+        { id = books_folder_id },
         local_path,
         book_name,
-        books_folder_id,
-        BookFormats.getMimeType(book_name),
         {
-            [ROLE_KEY] = "book",
-            [SCHEMA_KEY] = SCHEMA_VERSION,
+            mime_type = BookFormats.getMimeType(book_name),
+            metadata = {
+                [ROLE_KEY] = "book",
+                [SCHEMA_KEY] = SCHEMA_VERSION,
+            },
         }
     )
+
+    if not entry then
+        return nil, upload_error
+    end
+
+    return toLegacyDriveFile(entry), nil
 end
 
 --- Move a KOCloud-managed book to Google Drive Trash.
@@ -664,13 +949,7 @@ function GoogleDriveProvider:deleteBook(file_id)
         return false, "Google Drive book file ID is required"
     end
 
-    local access_token, token_error = self:getAccessToken()
-
-    if not access_token then
-        return false, token_error
-    end
-
-    return DriveApi:trashFile(access_token, file_id)
+    return self:deleteEntry({ id = file_id })
 end
 
 --- Download a KOCloud-managed book to a local path.
@@ -683,21 +962,7 @@ function GoogleDriveProvider:downloadBook(file_id, local_path)
         return false, "Google Drive book file ID is required"
     end
 
-    if type(local_path) ~= "string" or local_path == "" then
-        return false, "Local destination path is required"
-    end
-
-    local access_token, token_error = self:getAccessToken()
-
-    if not access_token then
-        return false, token_error
-    end
-
-    return DriveApi:downloadFile(
-        access_token,
-        file_id,
-        local_path
-    )
+    return self:downloadFile({ id = file_id }, local_path)
 end
 
 --- Forget all local user-specific Google OAuth token state.
