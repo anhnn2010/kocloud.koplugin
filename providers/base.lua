@@ -58,6 +58,24 @@ function BaseProvider:getType()
     return self.type
 end
 
+--- Return whether the provider has enough account/server configuration to
+--- perform remote operations. Providers should override this when needed.
+---@return boolean
+function BaseProvider:isConfigured()
+    return false
+end
+
+--- Return whether provider-owned long-lived configuration changed in memory.
+--- Providers without transient migration/cleanup state may keep this default.
+---@return boolean
+function BaseProvider:isPersistentConfigDirty()
+    return false
+end
+
+--- Mark provider-owned long-lived configuration as persisted.
+function BaseProvider:markPersistentConfigSaved()
+end
+
 --- Return generic capabilities implemented by this provider adapter.
 ---
 --- Capabilities describe the KOCloud adapter implementation, not merely what
