@@ -1,21 +1,14 @@
-local BookFormats = require("core/book_formats")
+local BookActions = require("core/ui/library/book_actions")
+local SelectionActions = require("core/ui/library/selection_actions")
 local ButtonDialog = require("ui/widget/buttondialog")
 local CheckButton = require("ui/widget/checkbutton")
-local ConfirmBox = require("ui/widget/confirmbox")
 local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
-local MultiConfirmBox = require("ui/widget/multiconfirmbox")
 local Menu = require("ui/widget/menu")
-local lfs = require("libs/libkoreader-lfs")
 local NetworkMgr = require("ui/network/manager")
-local PathChooser = require("ui/widget/pathchooser")
 local UIManager = require("ui/uimanager")
-local filemanagerutil = require("apps/filemanager/filemanagerutil")
-local ffiUtil = require("ffi/util")
 local util = require("util")
 local _ = require("gettext")
-local N_ = _.ngettext
-local T = ffiUtil.template
 
 --- Remote KOCloud Books browser backed by the active cloud provider.
 ---
@@ -24,9 +17,8 @@ local T = ffiUtil.template
 --- as folders change, and long-pressing a file exposes Delete / Select actions.
 ---@class KOCloudBooksBrowser: Menu
 ---@field library KOCloudLibraryService
----@field selected_books? table<string, KOCloudLibraryEntry>
----@field last_download_dir? string
----@field last_upload_dir? string
+---@field book_actions KOCloudBookActions
+---@field selection_actions KOCloudSelectionActions
 local BooksBrowser = Menu:extend{
     title = _("My Books"),
     subtitle = _("KOCloud/Books"),
@@ -38,49 +30,32 @@ local BooksBrowser = Menu:extend{
     is_popout = false,
 }
 
---- Convert a remote file name into a safe local file name.
----@param name string
----@return string
-local function sanitizeLocalFilename(name)
-    local safe_name = name:gsub("[/\\]", "_")
-    safe_name = safe_name:gsub("^%s+", "")
-    safe_name = safe_name:gsub("%s+$", "")
-
-    if safe_name == "" or safe_name == "." or safe_name == ".." then
-        return "book"
-    end
-
-    return safe_name
-end
-
---- Join a local directory and file name.
----@param directory string
----@param filename string
----@return string
-local function joinLocalPath(directory, filename)
-    if directory:sub(-1) == "/" then
-        return directory .. filename
-    end
-
-    return directory .. "/" .. filename
-end
-
 --- Initialize the browser and load the KOCloud Books root.
 function BooksBrowser:init()
     if not self.library then
         error("KOCloud BooksBrowser requires LibraryService")
     end
 
+    self.book_actions = BookActions:new{
+        browser = self,
+        library = self.library,
+    }
+    self.selection_actions = SelectionActions:new{
+        browser = self,
+        library = self.library,
+        book_actions = self.book_actions,
+    }
+
     self.onLeftButtonTap = function()
-        if self.selected_books then
-            self:showSelectModeDialog()
+        if self.selection_actions:isActive() then
+            self.selection_actions:showDialog()
         else
             self:showFolderActions()
         end
     end
 
     self.onLeftButtonHold = function()
-        self:toggleSelectMode()
+        self.selection_actions:toggle()
     end
 
     Menu.init(self)
@@ -98,7 +73,7 @@ function BooksBrowser:showFolderActions()
                     text = _("Upload book"),
                     callback = function()
                         UIManager:close(dialog)
-                        self:chooseBookForUpload()
+                        self.book_actions:chooseUpload()
                     end,
                 },
             },
@@ -132,644 +107,6 @@ function BooksBrowser:showFolderActions()
     }
 
     UIManager:show(dialog)
-end
-
---- Show actions for one KOCloud-managed book.
----@param book KOCloudLibraryEntry
-function BooksBrowser:showBookActions(book)
-    local dialog
-
-    dialog = ButtonDialog:new{
-        title = book.name or _("Book"),
-        buttons = {
-            {
-                {
-                    text = _("Download"),
-                    callback = function()
-                        UIManager:close(dialog)
-                        self:chooseBookDownloadFolder(book)
-                    end,
-                },
-            },
-            {
-                {
-                    text = _("Details"),
-                    callback = function()
-                        self:showBookDetails(book)
-                    end,
-                },
-            },
-            {
-                {
-                    text = _("Close"),
-                    callback = function()
-                        UIManager:close(dialog)
-                    end,
-                },
-            },
-        },
-    }
-
-    UIManager:show(dialog)
-end
-
---- Show provider-neutral metadata for one managed book.
----@param book KOCloudLibraryEntry
-function BooksBrowser:showBookDetails(book)
-    local size_text = _("Unknown")
-
-    if book.size then
-        local size = tonumber(book.size)
-
-        if size then
-            size_text = util.getFriendlySize(size)
-        end
-    end
-
-    local reference = book.key or _("Unknown")
-    local provider_name = self.library:getProviderName()
-
-    UIManager:show(InfoMessage:new{
-        text = string.format(
-            _(
-                "Name: %s\n"
-                    .. "Size: %s\n"
-                    .. "Modified: %s\n"
-                    .. "%s reference: %s"
-            ),
-            book.name or _("Unknown"),
-            size_text,
-            book.modified_at or _("Unknown"),
-            provider_name,
-            reference
-        ),
-    })
-end
-
---- Ask where one remote book should be downloaded.
----@param book KOCloudLibraryEntry
-function BooksBrowser:chooseBookDownloadFolder(book)
-    local caller_callback = function(directory)
-        if not directory then
-            return
-        end
-
-        local filename = sanitizeLocalFilename(book.name or "book")
-        local local_path = joinLocalPath(directory, filename)
-        self:confirmBookDownload(book, local_path)
-    end
-
-    filemanagerutil.showChooseDialog(
-        _("Choose download folder"),
-        caller_callback,
-        nil,
-        filemanagerutil.getHomeFolder()
-    )
-end
-
---- Confirm overwrite when needed before downloading one book.
----@param book KOCloudLibraryEntry
----@param local_path string
-function BooksBrowser:confirmBookDownload(book, local_path)
-    if lfs.attributes(local_path, "mode") ~= "file" then
-        self:downloadBook(book, local_path)
-        return
-    end
-
-    UIManager:show(ConfirmBox:new{
-        text = string.format(
-            _(
-                "A file already exists at:\n\n%s\n\n"
-                    .. "Overwrite it?"
-            ),
-            local_path
-        ),
-        ok_text = _("Overwrite"),
-        ok_callback = function()
-            self:downloadBook(book, local_path)
-        end,
-    })
-end
-
---- Download one Library book to local storage.
----@param book KOCloudLibraryEntry
----@param local_path string
-function BooksBrowser:downloadBook(book, local_path)
-    local downloading_message = InfoMessage:new{
-        text = string.format(
-            _("Downloading book…\n\n%s"),
-            book.name or _("Book")
-        ),
-    }
-
-    UIManager:show(downloading_message)
-
-    UIManager:scheduleIn(0.1, function()
-        local success, err = self.library:downloadBook(book, local_path)
-
-        UIManager:close(downloading_message)
-
-        if not success then
-            UIManager:show(InfoMessage:new{
-                text = string.format(
-                    _("Cannot download book:\n\n%s"),
-                    err or _("Unknown error")
-                ),
-            })
-            return
-        end
-
-        UIManager:show(InfoMessage:new{
-            text = string.format(
-                _("Book downloaded successfully.\n\n%s"),
-                local_path
-            ),
-            timeout = 5,
-        })
-    end)
-end
-
---- Open KOReader's PathChooser directly for one supported local book.
-function BooksBrowser:chooseBookForUpload()
-    local path_chooser
-    path_chooser = PathChooser:new{
-        select_directory = false,
-        select_file = true,
-        show_files = true,
-        file_filter = BookFormats.isSupported,
-        path = self.last_upload_dir or filemanagerutil.getHomeFolder(),
-        onConfirm = function(local_path)
-            local directory = ffiUtil.dirname(local_path)
-            if directory and directory ~= "" then
-                self.last_upload_dir = directory
-            end
-
-            NetworkMgr:runWhenOnline(function()
-                self:uploadBook(local_path)
-            end)
-        end,
-    }
-
-    UIManager:show(path_chooser)
-end
-
---- Upload one local book into the currently open Library folder.
----@param local_path string
-function BooksBrowser:uploadBook(local_path)
-    local uploading_message = InfoMessage:new{
-        text = string.format(
-            _("Uploading book…\n\n%s"),
-            local_path
-        ),
-    }
-
-    UIManager:show(uploading_message)
-
-    UIManager:scheduleIn(0.1, function()
-        local book, err = self.library:uploadBook(
-            local_path,
-            self:getCurrentFolderRef()
-        )
-
-        UIManager:close(uploading_message)
-
-        if not book then
-            UIManager:show(InfoMessage:new{
-                text = string.format(
-                    _("Cannot upload book:\n\n%s"),
-                    err or _("Unknown error")
-                ),
-            })
-            return
-        end
-
-        local uploaded_name = book.name or _("Book")
-
-        self:loadCurrentFolder(function()
-            UIManager:show(InfoMessage:new{
-                text = string.format(
-                    _("Book uploaded successfully.\n\n%s"),
-                    uploaded_name
-                ),
-                timeout = 4,
-            })
-        end)
-    end)
-end
-
---- Toggle Cloud storage+-style remote file selection mode.
-function BooksBrowser:toggleSelectMode()
-    if self.selected_books then
-        for _index, item in ipairs(self.item_table) do
-            item.dim = nil
-        end
-        self.selected_books = nil
-        self:setTitleBarLeftIcon("appbar.menu")
-        self:updateItems(1, true)
-        return
-    end
-
-    self.selected_books = {}
-    self:setTitleBarLeftIcon("check")
-end
-
---- Show Delete / Select actions when a remote book is long-pressed.
----@param item table
-function BooksBrowser:showBookHoldDialog(item)
-    local dialog
-    local book = item.book
-
-    if not book then
-        return
-    end
-
-    dialog = ButtonDialog:new{
-        title = book.name or _("Book"),
-        title_align = "center",
-        buttons = {
-            {
-                {
-                    text = _("Delete"),
-                    callback = function()
-                        UIManager:close(dialog)
-                        self:showBookDeleteDialog(book)
-                    end,
-                },
-                {
-                    text = _("Select"),
-                    callback = function()
-                        UIManager:close(dialog)
-                        self:toggleSelectMode()
-                        self.selected_books[book.key] = book
-                        item.dim = true
-                        self:updateItems(1, true)
-                    end,
-                },
-            },
-        },
-    }
-
-    UIManager:show(dialog)
-end
-
---- Confirm moving one remote book to Trash.
----@param book KOCloudLibraryEntry
-function BooksBrowser:showBookDeleteDialog(book)
-    local delete_note = self.library:usesTrash()
-            and _("The file will be moved to Trash.")
-        or _("This action cannot be undone.")
-
-    UIManager:show(ConfirmBox:new{
-        text = _("Delete this file?")
-            .. "\n\n"
-            .. (book.name or _("Book"))
-            .. "\n\n"
-            .. delete_note,
-        ok_text = _("Delete"),
-        ok_callback = function()
-            NetworkMgr:runWhenOnline(function()
-                self:deleteBook(book)
-            end)
-        end,
-    })
-end
-
---- Move one remote book to Trash and refresh the browser.
----@param book KOCloudLibraryEntry
-function BooksBrowser:deleteBook(book)
-    local deleting_message = InfoMessage:new{
-        text = string.format(
-            _("Deleting…\n\n%s"),
-            book.name or _("Book")
-        ),
-    }
-
-    UIManager:show(deleting_message)
-
-    UIManager:scheduleIn(0.1, function()
-        local success, err = self.library:deleteBook(book)
-
-        UIManager:close(deleting_message)
-
-        if not success then
-            UIManager:show(InfoMessage:new{
-                text = string.format(
-                    _("Cannot delete book:\n\n%s"),
-                    err or _("Unknown error")
-                ),
-            })
-            return
-        end
-
-        if self.selected_books then
-            self.selected_books[book.key] = nil
-        end
-
-        self:loadCurrentFolder()
-    end)
-end
-
---- Return selected remote books as an array.
----@return KOCloudLibraryEntry[] books
-function BooksBrowser:getSelectedBooks()
-    local books = {}
-
-    if not self.selected_books then
-        return books
-    end
-
-    for book_id, book in pairs(self.selected_books) do
-        if book_id and book then
-            table.insert(books, book)
-        end
-    end
-
-    table.sort(books, function(left, right)
-        return (left.name or "") < (right.name or "")
-    end)
-
-    return books
-end
-
---- Show actions for Cloud storage+-style multi-select mode.
-function BooksBrowser:showSelectModeDialog()
-    local select_count = self.selected_books
-        and util.tableSize(self.selected_books)
-        or 0
-    local actions_enabled = select_count > 0
-    local dialog
-
-    dialog = ButtonDialog:new{
-        title = actions_enabled
-                and T(
-                    N_("1 book selected", "%1 books selected", select_count),
-                    select_count
-                )
-            or _("No books selected"),
-        title_align = "center",
-        buttons = {
-            {
-                {
-                    text = _("Delete"),
-                    enabled = actions_enabled,
-                    callback = function()
-                        UIManager:close(dialog)
-                        self:showSelectedBooksDeleteDialog()
-                    end,
-                },
-                {
-                    text = _("Download"),
-                    enabled = actions_enabled,
-                    callback = function()
-                        UIManager:close(dialog)
-                        self:showSelectedBooksDownloadDialog()
-                    end,
-                },
-            },
-            {},
-            {
-                {
-                    text = _("Deselect all"),
-                    enabled = actions_enabled,
-                    callback = function()
-                        UIManager:close(dialog)
-                        self.selected_books = {}
-                        for _index, item in ipairs(self.item_table) do
-                            item.dim = nil
-                        end
-                        self:updateItems(1, true)
-                    end,
-                },
-                {
-                    text = _("Select all books in folder"),
-                    callback = function()
-                        UIManager:close(dialog)
-                        for _index, item in ipairs(self.item_table) do
-                            if item.book then
-                                self.selected_books[item.book.key] = item.book
-                                item.dim = true
-                            end
-                        end
-                        self:updateItems(1, true)
-                    end,
-                },
-            },
-            {
-                {
-                    text = _("Exit select mode"),
-                    callback = function()
-                        UIManager:close(dialog)
-                        self:toggleSelectMode()
-                    end,
-                },
-            },
-        },
-    }
-
-    UIManager:show(dialog)
-end
-
---- Confirm and delete all selected books.
-function BooksBrowser:showSelectedBooksDeleteDialog()
-    local books = self:getSelectedBooks()
-    local book_count = #books
-
-    if book_count == 0 then
-        return
-    end
-
-    local delete_note = self.library:usesTrash()
-            and _("Files will be moved to Trash.")
-        or _("This action cannot be undone.")
-
-    UIManager:show(ConfirmBox:new{
-        text = T(
-            N_("Delete 1 book?", "Delete %1 books?", book_count),
-            book_count
-        ) .. "\n\n" .. delete_note,
-        ok_text = _("Delete"),
-        ok_callback = function()
-            NetworkMgr:runWhenOnline(function()
-                self:deleteSelectedBooks(books)
-            end)
-        end,
-    })
-end
-
---- Delete selected books while keeping failed items selected.
----@param books KOCloudLibraryEntry[]
-function BooksBrowser:deleteSelectedBooks(books)
-    local Trapper = require("ui/trapper")
-
-    Trapper:wrap(function()
-        local book_count = #books
-        local success_count = 0
-        local failure_count = 0
-
-        for index, book in ipairs(books) do
-            local text = string.format(
-                _("Deleting book (%d/%d):\n%s"),
-                index,
-                book_count,
-                book.name or _("Book")
-            )
-
-            if not Trapper:info(text) then
-                break
-            end
-
-            local success = self.library:deleteBook(book)
-
-            if success then
-                self.selected_books[book.key] = nil
-                success_count = success_count + 1
-            else
-                failure_count = failure_count + 1
-            end
-        end
-
-        Trapper:clear()
-
-        if not next(self.selected_books) then
-            self:toggleSelectMode()
-        end
-
-        self:loadCurrentFolder()
-
-        local text = T(
-            N_("Deleted 1 book.", "Deleted %1 books.", success_count),
-            success_count
-        )
-
-        if failure_count > 0 then
-            text = text
-                .. "\n"
-                .. T(
-                    N_(
-                        "Could not delete 1 book.",
-                        "Could not delete %1 books.",
-                        failure_count
-                    ),
-                    failure_count
-                )
-        end
-
-        UIManager:show(InfoMessage:new{ text = text })
-    end)
-end
-
---- Ask for one local folder and confirm downloading selected remote books.
----@param download_dir? string
-function BooksBrowser:showSelectedBooksDownloadDialog(download_dir)
-    local books = self:getSelectedBooks()
-    local book_count = #books
-
-    if book_count == 0 then
-        return
-    end
-
-    download_dir = download_dir
-        or self.last_download_dir
-        or filemanagerutil.getHomeFolder()
-
-    UIManager:show(MultiConfirmBox:new{
-        text = T(
-            N_("Download 1 book?", "Download %1 books?", book_count),
-            book_count
-        )
-            .. "\n\n"
-            .. _("Download folder:")
-            .. "\n"
-            .. download_dir
-            .. "\n\n"
-            .. _("Existing files will be overwritten."),
-        choice1_text = _("Choose folder"),
-        choice1_callback = function()
-            filemanagerutil.showChooseDialog(
-                _("Choose download folder"),
-                function(path)
-                    if path then
-                        self.last_download_dir = path
-                        self:showSelectedBooksDownloadDialog(path)
-                    end
-                end,
-                nil,
-                download_dir
-            )
-        end,
-        choice2_text = _("Download"),
-        choice2_callback = function()
-            self.last_download_dir = download_dir
-            NetworkMgr:runWhenOnline(function()
-                self:downloadSelectedBooks(books, download_dir)
-            end)
-        end,
-    })
-end
-
---- Download selected books to one local folder.
----@param books KOCloudLibraryEntry[]
----@param download_dir string
-function BooksBrowser:downloadSelectedBooks(books, download_dir)
-    local Trapper = require("ui/trapper")
-
-    Trapper:wrap(function()
-        local book_count = #books
-        local success_count = 0
-        local failure_count = 0
-
-        for index, book in ipairs(books) do
-            local text = string.format(
-                _("Downloading book (%d/%d):\n%s"),
-                index,
-                book_count,
-                book.name or _("Book")
-            )
-
-            if not Trapper:info(text) then
-                break
-            end
-
-            local filename = sanitizeLocalFilename(book.name or "book")
-            local local_path = joinLocalPath(download_dir, filename)
-            local success = self.library:downloadBook(book, local_path)
-
-            if success then
-                self.selected_books[book.key] = nil
-                success_count = success_count + 1
-            else
-                failure_count = failure_count + 1
-            end
-        end
-
-        Trapper:clear()
-
-        if not next(self.selected_books) then
-            self:toggleSelectMode()
-        else
-            self:loadCurrentFolder()
-        end
-
-        local text = T(
-            N_("Downloaded 1 book.", "Downloaded %1 books.", success_count),
-            success_count
-        )
-
-        if failure_count > 0 then
-            text = text
-                .. "\n"
-                .. T(
-                    N_(
-                        "Could not download 1 book.",
-                        "Could not download %1 books.",
-                        failure_count
-                    ),
-                    failure_count
-                )
-        end
-
-        UIManager:show(InfoMessage:new{ text = text })
-    end)
 end
 
 --- Prompt for a new folder name and create it under the current folder.
@@ -940,9 +277,7 @@ function BooksBrowser:buildItemTable(folders, books)
             text = book.name or _("Book"),
             mandatory = self:getBookInfo(book),
             book = book,
-            dim = self.selected_books
-                and self.selected_books[book.key] ~= nil
-                or nil,
+            dim = self.selection_actions:isSelected(book) or nil,
         })
     end
 
@@ -1010,17 +345,10 @@ function BooksBrowser:onMenuSelect(item)
         })
         self:loadCurrentFolder()
     elseif item.book then
-        if self.selected_books then
-            if self.selected_books[item.book.key] then
-                self.selected_books[item.book.key] = nil
-                item.dim = nil
-            else
-                self.selected_books[item.book.key] = item.book
-                item.dim = true
-            end
-            self:updateItems(1, true)
+        if self.selection_actions:isActive() then
+            self.selection_actions:toggleItem(item)
         else
-            self:showBookActions(item.book)
+            self.book_actions:show(item.book)
         end
     end
 
@@ -1031,10 +359,10 @@ end
 ---@param item table
 function BooksBrowser:onMenuHold(item)
     if item.book then
-        if self.selected_books then
-            self:showSelectModeDialog()
+        if self.selection_actions:isActive() then
+            self.selection_actions:showDialog()
         else
-            self:showBookHoldDialog(item)
+            self.selection_actions:showBookHoldDialog(item)
         end
     end
 
