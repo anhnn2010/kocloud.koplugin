@@ -8,6 +8,7 @@ local MultiConfirmBox = require("ui/widget/multiconfirmbox")
 local Menu = require("ui/widget/menu")
 local lfs = require("libs/libkoreader-lfs")
 local NetworkMgr = require("ui/network/manager")
+local PathChooser = require("ui/widget/pathchooser")
 local UIManager = require("ui/uimanager")
 local filemanagerutil = require("apps/filemanager/filemanagerutil")
 local ffiUtil = require("ffi/util")
@@ -25,6 +26,7 @@ local T = ffiUtil.template
 ---@field library KOCloudLibraryService
 ---@field selected_books? table<string, KOCloudLibraryEntry>
 ---@field last_download_dir? string
+---@field last_upload_dir? string
 local BooksBrowser = Menu:extend{
     title = _("My Books"),
     subtitle = _("KOCloud/Books"),
@@ -287,21 +289,28 @@ function BooksBrowser:downloadBook(book, local_path)
     end)
 end
 
---- Open KOReader's file chooser for one supported local book.
+--- Open KOReader's PathChooser directly for one supported local book.
 function BooksBrowser:chooseBookForUpload()
-    local caller_callback = function(local_path)
-        NetworkMgr:runWhenOnline(function()
-            self:uploadBook(local_path)
-        end)
-    end
+    local path_chooser
+    path_chooser = PathChooser:new{
+        select_directory = false,
+        select_file = true,
+        show_files = true,
+        file_filter = BookFormats.isSupported,
+        path = self.last_upload_dir or filemanagerutil.getHomeFolder(),
+        onConfirm = function(local_path)
+            local directory = ffiUtil.dirname(local_path)
+            if directory and directory ~= "" then
+                self.last_upload_dir = directory
+            end
 
-    filemanagerutil.showChooseDialog(
-        _("Choose a book to upload"),
-        caller_callback,
-        nil,
-        filemanagerutil.getHomeFolder(),
-        BookFormats.isSupported
-    )
+            NetworkMgr:runWhenOnline(function()
+                self:uploadBook(local_path)
+            end)
+        end,
+    }
+
+    UIManager:show(path_chooser)
 end
 
 --- Upload one local book into the currently open Library folder.
