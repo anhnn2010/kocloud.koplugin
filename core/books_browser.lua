@@ -334,15 +334,17 @@ function BooksBrowser:uploadBook(local_path)
             return
         end
 
-        UIManager:show(InfoMessage:new{
-            text = string.format(
-                _("Book uploaded successfully.\n\n%s"),
-                book.name or _("Book")
-            ),
-            timeout = 4,
-        })
+        local uploaded_name = book.name or _("Book")
 
-        self:loadCurrentFolder()
+        self:loadCurrentFolder(function()
+            UIManager:show(InfoMessage:new{
+                text = string.format(
+                    _("Book uploaded successfully.\n\n%s"),
+                    uploaded_name
+                ),
+                timeout = 4,
+            })
+        end)
     end)
 end
 
@@ -948,7 +950,8 @@ function BooksBrowser:buildItemTable(folders, books)
 end
 
 --- Reload the current remote folder into this Menu instance.
-function BooksBrowser:loadCurrentFolder()
+---@param on_loaded? fun()
+function BooksBrowser:loadCurrentFolder(on_loaded)
     local loading_message = InfoMessage:new{
         text = _("Loading KOCloud library…"),
     }
@@ -979,6 +982,10 @@ function BooksBrowser:loadCurrentFolder()
 
         if self.title_bar then
             self.title_bar:setSubTitle(self:getCurrentPath())
+        end
+
+        if on_loaded then
+            on_loaded()
         end
     end)
 end
