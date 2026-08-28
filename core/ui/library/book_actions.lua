@@ -1,3 +1,4 @@
+local BD = require("ui/bidi")
 local BookFormats = require("core/book_formats")
 local ButtonDialog = require("ui/widget/buttondialog")
 local ConfirmBox = require("ui/widget/confirmbox")
@@ -212,13 +213,37 @@ function BookActions:download(book, local_path)
             return
         end
 
-        UIManager:show(InfoMessage:new{
-            text = string.format(
-                _("Book downloaded successfully.\n\n%s"),
-                local_path
+        self:showDownloadedDialog(local_path)
+    end)
+end
+
+--- Ask whether a successfully downloaded book should be opened now.
+--- This mirrors KOReader Cloud storage's post-download behavior.
+---@param local_path string
+function BookActions:showDownloadedDialog(local_path)
+    local confirm_box = ConfirmBox:new{
+        text = ffiUtil.template(
+            _(
+                "File saved to:\n%1\n"
+                    .. "Would you like to read the downloaded book now?"
             ),
-            timeout = 5,
-        })
+            BD.filepath(local_path)
+        ),
+        ok_text = _("Read now"),
+        ok_callback = function()
+            local Event = require("ui/event")
+            local ReaderUI = require("apps/reader/readerui")
+
+            UIManager:broadcastEvent(Event:new("SetupShowReader"))
+            self.browser:onClose()
+            ReaderUI:showReader(local_path)
+        end,
+    }
+
+    -- The download message was just closed; defer the confirmation by one UI
+    -- tick to avoid unnecessary e-Ink redraw congestion.
+    UIManager:nextTick(function()
+        UIManager:show(confirm_box)
     end)
 end
 
