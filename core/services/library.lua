@@ -23,6 +23,7 @@ LibraryService.__index = LibraryService
 
 local ROLE_KEY = Protocol.METADATA_KEYS.role
 local SCHEMA_KEY = Protocol.METADATA_KEYS.schema
+local SOURCE_KEY = Protocol.METADATA_KEYS.source
 
 --- Return the basename of a local path.
 ---@param path string
@@ -97,6 +98,23 @@ function LibraryService:_buildBookMetadata()
     return {
         [ROLE_KEY] = Protocol.ROLES.book,
         [SCHEMA_KEY] = Protocol.SCHEMA_VERSION,
+        [SOURCE_KEY] = Protocol.SOURCES.koreader,
+    }
+end
+
+--- Return custom metadata for a managed Library folder when supported.
+---@return table|nil metadata
+function LibraryService:_buildFolderMetadata()
+    local capabilities = self.provider:getCapabilities() or {}
+
+    if not capabilities.custom_metadata then
+        return nil
+    end
+
+    return {
+        [ROLE_KEY] = Protocol.ROLES.book_folder,
+        [SCHEMA_KEY] = Protocol.SCHEMA_VERSION,
+        [SOURCE_KEY] = Protocol.SOURCES.koreader,
     }
 end
 
@@ -200,7 +218,10 @@ function LibraryService:createFolder(folder_name, parent_ref)
 
     local entry, create_error = self.provider:createFolder(
         resolved_ref,
-        folder_name
+        folder_name,
+        {
+            metadata = self:_buildFolderMetadata(),
+        }
     )
 
     if not entry then

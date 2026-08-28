@@ -1,4 +1,5 @@
 local Protocol = require("core/protocol")
+local rapidjson = require("rapidjson")
 
 --- Provider-neutral KOCloud storage-layout manager.
 ---
@@ -364,6 +365,133 @@ function StorageLayoutService:_ensureManagedFolder(
     return created_entry, true, nil
 end
 
+
+--- Return provider metadata for the portable protocol manifest.
+---@return table|nil metadata
+function StorageLayoutService:_buildManifestMetadata()
+    local capabilities = self:_getCapabilities()
+
+    if not capabilities.custom_metadata then
+        return nil
+    end
+
+    return {
+        [ROLE_KEY] = Protocol.ROLES.manifest,
+        [SCHEMA_KEY] = Protocol.SCHEMA_VERSION,
+        [INTERNAL_KEY] = "true",
+    }
+end
+
+--- Return an existing protocol manifest entry from `.kocloud`.
+---@param metadata_ref KOCloudRemoteRef
+---@return KOCloudRemoteEntry|nil entry
+---@return string|nil error_message
+function StorageLayoutService:_findProtocolManifest(metadata_ref)
+    local entries, list_error = self.provider:listChildren(metadata_ref, {
+        order_by = "name",
+    })
+
+    if not entries then
+        return nil, list_error
+    end
+
+    for _, entry in ipairs(entries) do
+        if entry.kind == "file"
+            and entry.name == Protocol.MANIFEST.filename
+        then
+            return entry, nil
+        end
+    end
+
+    return nil, nil
+end
+
+--- Create `.kocloud/manifest.json` when it is missing.
+---
+--- Existing manifests are intentionally left untouched in Protocol v1. Future
+--- schema upgrades will use explicit migrations instead of silently replacing
+--- a user's portable storage contract.
+---@param metadata_ref KOCloudRemoteRef
+---@return boolean created
+---@return string|nil error_message
+function StorageLayoutService:_ensureProtocolManifest(metadata_ref)
+    local existing, find_error = self:_findProtocolManifest(metadata_ref)
+
+    if find_error then
+        return false, find_error
+    end
+
+    if existing then
+        local temp_path = os.tmpname()
+        local downloaded, download_error = self.provider:downloadFile(
+            existing.ref,
+            temp_path
+        )
+
+        if not downloaded then
+            os.remove(temp_path)
+            return false, download_error or "Cannot read KOCloud manifest"
+        end
+
+        local file, open_error = io.open(temp_path, "rb")
+
+        if not file then
+            os.remove(temp_path)
+            return false, open_error or "Cannot open KOCloud manifest"
+        end
+
+        local content = file:read("*a")
+        file:close()
+        os.remove(temp_path)
+
+        local manifest, decode_error = rapidjson.decode(content)
+
+        if not manifest then
+            return false, decode_error or "Invalid KOCloud manifest JSON"
+        end
+
+        if not Protocol.isManifestV1(manifest) then
+            return false,
+                "Unsupported or incompatible KOCloud storage manifest"
+        end
+
+        return false, nil
+    end
+
+    local temp_path = os.tmpname()
+    local file, open_error = io.open(temp_path, "wb")
+
+    if not file then
+        return false, open_error or "Cannot create KOCloud manifest file"
+    end
+
+    local wrote, write_error = file:write(Protocol.buildManifestJson())
+    file:close()
+
+    if not wrote then
+        os.remove(temp_path)
+        return false, write_error or "Cannot write KOCloud manifest file"
+    end
+
+    local entry, upload_error = self.provider:uploadFile(
+        metadata_ref,
+        temp_path,
+        Protocol.MANIFEST.filename,
+        {
+            mime_type = Protocol.MANIFEST.mime_type,
+            metadata = self:_buildManifestMetadata(),
+        }
+    )
+
+    os.remove(temp_path)
+
+    if not entry then
+        return false, upload_error or "Cannot upload KOCloud manifest"
+    end
+
+    return true, nil
+end
+
 --- Ensure the complete provider-neutral KOCloud storage layout exists.
 ---@return table<string, KOCloudRemoteEntry>|nil folders
 ---@return integer created_count
@@ -400,6 +528,13 @@ function StorageLayoutService:ensureStorageLayout()
         if created then
             created_count = created_count + 1
         end
+    end
+
+    local _manifest_created, manifest_error =
+        self:_ensureProtocolManifest(folders.metadata.ref)
+
+    if manifest_error then
+        return nil, created_count, manifest_error
     end
 
     local cached, cache_error = self:_cacheLayout(root, folders)
