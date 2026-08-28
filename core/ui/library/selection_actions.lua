@@ -3,6 +3,7 @@ local ConfirmBox = require("ui/widget/confirmbox")
 local InfoMessage = require("ui/widget/infomessage")
 local MultiConfirmBox = require("ui/widget/multiconfirmbox")
 local NetworkMgr = require("ui/network/manager")
+local PathChooser = require("ui/widget/pathchooser")
 local UIManager = require("ui/uimanager")
 local filemanagerutil = require("apps/filemanager/filemanagerutil")
 local ffiUtil = require("ffi/util")
@@ -350,17 +351,21 @@ function SelectionActions:showDownloadDialog(download_dir)
             .. _("Existing files will be overwritten."),
         choice1_text = _("Choose folder"),
         choice1_callback = function()
-            filemanagerutil.showChooseDialog(
-                _("Choose download folder"),
-                function(path)
+            local path_chooser
+            path_chooser = PathChooser:new{
+                select_directory = true,
+                select_file = false,
+                show_files = false,
+                path = download_dir,
+                onConfirm = function(path)
                     if path then
                         self.last_download_dir = path
                         self:showDownloadDialog(path)
                     end
                 end,
-                nil,
-                download_dir
-            )
+            }
+
+            UIManager:show(path_chooser)
         end,
         choice2_text = _("Download"),
         choice2_callback = function()

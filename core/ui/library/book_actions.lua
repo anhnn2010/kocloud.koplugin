@@ -139,20 +139,25 @@ end
 --- Ask where one remote book should be downloaded.
 ---@param book KOCloudLibraryEntry
 function BookActions:chooseDownloadFolder(book)
-    local caller_callback = function(directory)
-        if not directory then
-            return
-        end
+    local path_chooser
+    path_chooser = PathChooser:new{
+        select_directory = true,
+        select_file = false,
+        show_files = false,
+        path = filemanagerutil.getHomeFolder(),
+        onConfirm = function(directory)
+            if not directory then
+                return
+            end
 
-        self:confirmDownload(book, self:buildLocalPath(directory, book))
-    end
+            self:confirmDownload(
+                book,
+                self:buildLocalPath(directory, book)
+            )
+        end,
+    }
 
-    filemanagerutil.showChooseDialog(
-        _("Choose download folder"),
-        caller_callback,
-        nil,
-        filemanagerutil.getHomeFolder()
-    )
+    UIManager:show(path_chooser)
 end
 
 --- Confirm overwrite when needed before downloading one book.
