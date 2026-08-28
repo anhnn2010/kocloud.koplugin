@@ -70,6 +70,7 @@ function BookActions:show(book)
 
     dialog = ButtonDialog:new{
         title = book.name or _("Book"),
+        title_align = "center",
         buttons = {
             {
                 {
