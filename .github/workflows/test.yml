@@ -1,0 +1,27 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lua:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install LuaJIT
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y luajit
+
+      - name: Check Lua syntax
+        run: |
+          find . -name '*.lua' -print0 | while IFS= read -r -d '' file; do
+            luajit -b "$file" /tmp/kocloud-bytecode.out
+          done
+
+      - name: Run unit and contract tests
+        run: luajit tests/run.lua
